@@ -27,13 +27,16 @@
 		"url": "git+https://github.com/actuallyjamez/elysian.git"
 	},
 	"publishConfig": {
-		"registry": "https://npm.pkg.github.com"
+		"access": "public"
 	},
 	"scripts": {
 		"build": "rm -rf dist && tsc",
 		"prepublishOnly": "bun run build",
 		"dev": "tsc --watch",
-		"test": "bun test"
+		"test": "bun test",
+		"changeset": "changeset",
+		"version": "changeset version",
+		"release": "npm publish"
 	},
 	"keywords": [
 		"elysia",
@@ -58,6 +61,8 @@
 		"picocolors": "^1.1.1"
 	},
 	"devDependencies": {
+		"@changesets/changelog-github": "^0.5.2",
+		"@changesets/cli": "^2.29.8",
 		"@types/aws-lambda": "^8.10.160",
 		"@types/bun": "^1.3.7",
 		"elysia": "^1.4.22",
