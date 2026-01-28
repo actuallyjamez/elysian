@@ -4,6 +4,7 @@
 
 import { defineCommand } from "citty";
 import consola from "consola";
+import pc from "picocolors";
 import { existsSync, mkdirSync } from "fs";
 import { resolve, basename } from "path";
 import {
@@ -120,13 +121,21 @@ export const initCommand = defineCommand({
 		// If we created in a subdirectory, tell user to cd into it
 		const cdStep = targetDir !== "." ? `cd ${targetDir}\n\n` : "";
 
-		consola.box(
-			"Project initialized!\n\n" +
-				"Next steps:\n\n" +
-				cdStep +
-				(answers.installDeps ? "" : `${pm} add elysia @actuallyjamez/elysian\n\n`) +
-				`${runCmd} elysian build\n\n` +
-				"cd terraform && terraform init && terraform apply",
-		);
+		console.log(`  ${pc.green("✓")} Project initialized!`);
+		console.log();
+		console.log(`  ${pc.bold("Next steps")}:`);
+		console.log();
+		if (cdStep) {
+			console.log(`    ${cdStep}`);
+		}
+		if (!answers.installDeps) {
+			console.log(`    ${pm} add elysia @actuallyjamez/elysian`);
+			console.log();
+		}
+		console.log(`    ${runCmd} elysian build`);
+		console.log();
+		console.log(`    cd terraform && terraform init && terraform apply`);
+		console.log();
+		console.log(pc.dim("  " + "─".repeat(40)));
 	},
 });
