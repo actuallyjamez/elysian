@@ -1,0 +1,65 @@
+{
+	"name": "@actuallyjamez/elysian",
+	"version": "0.1.0",
+	"description": "Automatic Lambda bundler for Elysia with API Gateway and Terraform integration",
+	"type": "module",
+	"main": "./dist/index.js",
+	"types": "./dist/index.d.ts",
+	"bin": {
+		"elysian": "./dist/cli/index.js"
+	},
+	"exports": {
+		".": {
+			"types": "./dist/index.d.ts",
+			"import": "./dist/index.js"
+		},
+		"./runtime": {
+			"types": "./dist/runtime/index.d.ts",
+			"import": "./dist/runtime/index.js"
+		}
+	},
+	"files": [
+		"dist",
+		"templates"
+	],
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/actuallyjamez/elysian.git"
+	},
+	"publishConfig": {
+		"registry": "https://npm.pkg.github.com"
+	},
+	"scripts": {
+		"build": "rm -rf dist && tsc",
+		"prepublishOnly": "bun run build",
+		"dev": "tsc --watch",
+		"test": "bun test"
+	},
+	"keywords": [
+		"elysia",
+		"lambda",
+		"aws",
+		"api-gateway",
+		"serverless",
+		"terraform",
+		"bundler",
+		"elysian"
+	],
+	"author": "actuallyjamez",
+	"license": "MIT",
+	"peerDependencies": {
+		"elysia": ">=1.0.0"
+	},
+	"dependencies": {
+		"@elysiajs/openapi": "^1.4.14",
+		"citty": "^0.1.6",
+		"consola": "^3.4.2",
+		"hono": "^4.11.7"
+	},
+	"devDependencies": {
+		"@types/aws-lambda": "^8.10.160",
+		"@types/bun": "^1.3.7",
+		"elysia": "^1.4.22",
+		"typescript": "^5.8.3"
+	}
+}
