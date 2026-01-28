@@ -135,7 +135,5 @@ export const initCommand = defineCommand({
 		console.log(`    ${runCmd} elysian build`);
 		console.log();
 		console.log(`    cd terraform && terraform init && terraform apply`);
-		console.log();
-		console.log(pc.dim("  " + "─".repeat(40)));
 	},
 });
