@@ -65,7 +65,7 @@ export function appendProviders(existing: string): string {
 /**
  * Get missing variables and return the block to append
  */
-export function getMissingVariables(existing: string, apiName: string): string {
+export function getMissingVariables(existing: string, name: string): string {
 	const variables: Record<string, string> = {
 		region: `
 variable "region" {
@@ -102,9 +102,9 @@ variable "lambda_timeout" {
   default = 30
 }`,
 		api_name: `
-variable "api_name" {
+	variable "api_name" {
   type    = string
-  default = "${apiName}"
+  default = "${name}"
 }`,
 		tags: `
 variable "tags" {
@@ -270,7 +270,7 @@ export function appendOutputs(existing: string): string {
 export const templates = {
 	providers: PROVIDERS_BLOCK.trim() + "\n",
 
-	variables: (apiName: string) =>
+	variables: (name: string) =>
 		`# Elysian: Terraform Variables
 
 variable "region" {
@@ -309,7 +309,7 @@ variable "lambda_timeout" {
 
 variable "api_name" {
   type    = string
-  default = "${apiName}"
+  default = "${name}"
 }
 
 variable "tags" {

@@ -46,7 +46,7 @@ export const initCommand = defineCommand({
 
 		// Resolve the target directory
 		const cwd = resolve(originalCwd, targetDir);
-		const apiName = basename(cwd);
+		const name = basename(cwd);
 
 		// Create directory if it doesn't exist
 		if (!existsSync(cwd)) {
@@ -69,25 +69,25 @@ export const initCommand = defineCommand({
 		let answers: WizardAnswers | null;
 
 		if (info.isEmpty) {
-			const result = await runFreshProjectWizard(apiName);
+			const result = await runFreshProjectWizard(name);
 			if (!result) {
 				consola.info("Cancelled");
 				process.exit(0);
 			}
 			answers = {
 				targetDir,
-				apiName,
+				name,
 				...result,
 			};
 		} else {
-			const result = await runExistingProjectWizard(apiName, info.packageManager);
+			const result = await runExistingProjectWizard(name, info.packageManager);
 			if (!result) {
 				consola.info("Cancelled");
 				process.exit(0);
 			}
 			answers = {
 				targetDir,
-				apiName,
+				name,
 				...result,
 			};
 		}

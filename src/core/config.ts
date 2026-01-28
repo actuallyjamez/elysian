@@ -5,9 +5,9 @@
 export interface OpenAPIConfig {
 	/** Enable OpenAPI auto-aggregation (default: true) */
 	enabled?: boolean;
-	/** API title for OpenAPI spec */
+	/** API title for OpenAPI spec (defaults to name if not provided) */
 	title?: string;
-	/** API version for OpenAPI spec */
+	/** API version for OpenAPI spec (defaults to package.json version if not provided) */
 	version?: string;
 	/** API description for OpenAPI spec */
 	description?: string;
@@ -40,7 +40,7 @@ export interface TerraformConfig {
 
 export interface ElysianConfig {
 	/** Name of the API (used for resource naming) */
-	apiName: string;
+	name: string;
 
 	/** Directory containing lambda files (default: "src/lambdas") */
 	lambdasDir?: string;
@@ -62,7 +62,7 @@ export interface ElysianConfig {
 }
 
 export interface ResolvedConfig {
-	apiName: string;
+	name: string;
 	lambdasDir: string;
 	outputDir: string;
 	openapi: Required<OpenAPIConfig>;
@@ -71,7 +71,7 @@ export interface ResolvedConfig {
 	terraform: Required<TerraformConfig>;
 }
 
-const DEFAULT_CONFIG: Omit<ResolvedConfig, "apiName"> = {
+const DEFAULT_CONFIG: Omit<ResolvedConfig, "name"> = {
 	lambdasDir: "src/lambdas",
 	outputDir: "dist",
 	openapi: {
@@ -97,6 +97,19 @@ const DEFAULT_CONFIG: Omit<ResolvedConfig, "apiName"> = {
 };
 
 /**
+ * Read version from package.json
+ */
+async function readPackageVersion(cwd: string): Promise<string | null> {
+	const packagePath = `${cwd}/package.json`;
+	try {
+		const content = await Bun.file(packagePath).json();
+		return content.version || null;
+	} catch {
+		return null;
+	}
+}
+
+/**
  * Define configuration with type safety and defaults
  */
 export function defineConfig(config: ElysianConfig): ElysianConfig {
@@ -106,15 +119,21 @@ export function defineConfig(config: ElysianConfig): ElysianConfig {
 /**
  * Resolve configuration with defaults applied
  */
-export function resolveConfig(config: ElysianConfig): ResolvedConfig {
+export async function resolveConfig(
+	config: ElysianConfig,
+	cwd: string,
+): Promise<ResolvedConfig> {
+	const pkgVersion = await readPackageVersion(cwd);
+
 	return {
-		apiName: config.apiName,
+		name: config.name,
 		lambdasDir: config.lambdasDir ?? DEFAULT_CONFIG.lambdasDir,
 		outputDir: config.outputDir ?? DEFAULT_CONFIG.outputDir,
 		openapi: {
 			enabled: config.openapi?.enabled ?? DEFAULT_CONFIG.openapi.enabled,
-			title: config.openapi?.title ?? DEFAULT_CONFIG.openapi.title,
-			version: config.openapi?.version ?? DEFAULT_CONFIG.openapi.version,
+			title: config.openapi?.title ?? config.name,
+			version:
+				config.openapi?.version ?? pkgVersion ?? DEFAULT_CONFIG.openapi.version,
 			description:
 				config.openapi?.description ?? DEFAULT_CONFIG.openapi.description,
 		},
@@ -149,11 +168,11 @@ export async function loadConfig(cwd: string = process.cwd()): Promise<ResolvedC
 		const configModule = await import(configPath);
 		const config = configModule.default as ElysianConfig;
 
-		if (!config.apiName) {
-			throw new Error("apiName is required in elysian.config.ts");
+		if (!config.name) {
+			throw new Error("name is required in elysian.config.ts");
 		}
 
-		return resolveConfig(config);
+		return resolveConfig(config, cwd);
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code === "ERR_MODULE_NOT_FOUND") {
 			throw new Error(

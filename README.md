@@ -119,7 +119,7 @@ import { defineConfig } from "@actuallyjamez/elysian";
 
 export default defineConfig({
   // Required: Used for naming your AWS resources
-  apiName: "my-api",
+  name: "my-api",
 
   // Optional: Lambda source directory (default: "src/lambdas")
   lambdasDir: "src/lambdas",
@@ -128,10 +128,11 @@ export default defineConfig({
   outputDir: "dist",
 
   // Optional: OpenAPI configuration (default: enabled)
+  // Note: title and version have smart defaults
   openapi: {
     enabled: true,
-    title: "My API",
-    version: "1.0.0",
+    // title defaults to `name` if not provided
+    // version defaults to package.json version if not provided
     description: "API description",
   },
 

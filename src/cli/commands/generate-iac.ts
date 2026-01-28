@@ -28,7 +28,7 @@ export const generateIacCommand = defineCommand({
 			process.exit(1);
 		}
 
-		const apiName = config.apiName;
+		const name = config.name;
 		const outputDir = join(process.cwd(), config.outputDir);
 		const terraformDir = join(process.cwd(), config.terraform.outputDir);
 
@@ -59,7 +59,7 @@ export const generateIacCommand = defineCommand({
 		// The manifest generator will re-add the prefix
 		const lambdaFiles = jsFiles.map((f) => {
 			const bundleName = f.replace(/\.js$/, "");
-			const originalName = getOriginalLambdaName(apiName, bundleName);
+			const originalName = getOriginalLambdaName(name, bundleName);
 			return `${originalName}.ts`;
 		});
 
@@ -73,7 +73,7 @@ export const generateIacCommand = defineCommand({
 				lambdaFiles,
 				outputDir,
 				config.openapi.enabled,
-				apiName,
+				name,
 			);
 
 			// Write JSON manifest

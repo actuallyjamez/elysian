@@ -5,15 +5,11 @@
 /**
  * elysian.config.ts template
  */
-export function configTemplate(apiName: string): string {
+export function configTemplate(name: string): string {
 	return `import { defineConfig } from "@actuallyjamez/elysian";
 
 export default defineConfig({
-	apiName: "${apiName}",
-	openapi: {
-		title: "${apiName}",
-		version: "1.0.0",
-	},
+	name: "${name}",
 });
 `;
 }
@@ -43,10 +39,10 @@ export default createLambda()
 /**
  * package.json template for fresh projects
  */
-export function packageJsonTemplate(apiName: string): string {
+export function packageJsonTemplate(name: string): string {
 	return JSON.stringify(
 		{
-			name: apiName,
+			name: name,
 			version: "0.1.0",
 			type: "module",
 			scripts: {

@@ -1,20 +1,21 @@
 /**
- * Naming utilities for lambda bundles
+ * Lambda naming utilities
  */
 
 /**
- * Generate the prefixed lambda name for bundle files
- * Format: {apiName}-{lambdaName}
+ * Generate Lambda bundle name with API name prefix
+ * Format: {name}-{lambdaName}
  */
-export function getLambdaBundleName(apiName: string, lambdaName: string): string {
-	return `${apiName}-${lambdaName}`;
+export function getLambdaBundleName(name: string, lambdaName: string): string {
+	return `${name}-${lambdaName}`;
 }
 
 /**
- * Extract the original lambda name from a prefixed bundle name
+ * Extract original lambda name from bundle name
+ * Reverses getLambdaBundleName()
  */
-export function getOriginalLambdaName(apiName: string, bundleName: string): string {
-	const prefix = `${apiName}-`;
+export function getOriginalLambdaName(name: string, bundleName: string): string {
+	const prefix = `${name}-`;
 	if (bundleName.startsWith(prefix)) {
 		return bundleName.slice(prefix.length);
 	}

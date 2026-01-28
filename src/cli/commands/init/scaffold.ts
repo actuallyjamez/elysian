@@ -87,7 +87,7 @@ export async function scaffoldProject(
 		const packageJsonPath = join(cwd, "package.json");
 		await writeFile(
 			packageJsonPath,
-			packageJsonTemplate(answers.apiName),
+			packageJsonTemplate(answers.name),
 			result,
 			false,
 		);
@@ -108,7 +108,7 @@ export async function scaffoldProject(
 	if (!existsSync(configPath) || force) {
 		await writeFile(
 			configPath,
-			configTemplate(answers.apiName),
+			configTemplate(answers.name),
 			result,
 			existsSync(configPath),
 		);
@@ -123,7 +123,7 @@ export async function scaffoldProject(
 	}
 
 	// Handle Terraform files
-	await scaffoldTerraform(cwd, info, answers.apiName, result);
+	await scaffoldTerraform(cwd, info, answers.name, result);
 
 	return result;
 }
@@ -134,7 +134,7 @@ export async function scaffoldProject(
 async function scaffoldTerraform(
 	cwd: string,
 	info: ProjectInfo,
-	apiName: string,
+	name: string,
 	result: ScaffoldResult,
 ): Promise<void> {
 	const tfDir = join(cwd, "terraform");
@@ -157,14 +157,14 @@ async function scaffoldTerraform(
 	const variablesPath = join(tfDir, "variables.tf");
 	if (info.terraformFiles.variables) {
 		const existing = await readFileOrEmpty(variablesPath);
-		const updated = getMissingVariables(existing, apiName);
+		const updated = getMissingVariables(existing, name);
 		if (updated !== existing) {
 			await writeFile(variablesPath, updated, result, true);
 		} else {
 			result.skipped.push(variablesPath);
 		}
 	} else {
-		await writeFile(variablesPath, tfTemplates.variables(apiName), result, false);
+		await writeFile(variablesPath, tfTemplates.variables(name), result, false);
 	}
 
 	// main.tf

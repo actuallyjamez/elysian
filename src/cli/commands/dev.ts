@@ -35,7 +35,7 @@ export const devCommand = defineCommand({
 			process.exit(1);
 		}
 
-		const apiName = config.apiName;
+		const name = config.name;
 		const lambdasDir = join(process.cwd(), config.lambdasDir);
 		const outputDir = join(process.cwd(), config.outputDir);
 		const tempDir = join(outputDir, "__temp__");
@@ -61,7 +61,7 @@ export const devCommand = defineCommand({
 		// Build function for a single lambda
 		async function buildSingleLambda(filename: string): Promise<boolean> {
 			const name = filename.replace(/\.ts$/, "");
-			const bundleName = getLambdaBundleName(apiName, name);
+			const bundleName = getLambdaBundleName(name, name);
 			const inputPath = join(lambdasDir, filename);
 
 			// Create wrapper entry

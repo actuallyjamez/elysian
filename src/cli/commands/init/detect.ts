@@ -29,7 +29,7 @@ export interface ProjectInfo {
 	hasLambdasDir: boolean;
 	/** Whether there are any .ts files in src/lambdas/ */
 	hasLambdaFiles: boolean;
-	/** Directory name (for default apiName) */
+	/** Directory name (for default name) */
 	directoryName: string;
 }
 

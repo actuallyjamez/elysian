@@ -73,7 +73,7 @@ export async function generateManifest(
 	lambdaFiles: string[],
 	outputDir: string,
 	openapiEnabled: boolean = true,
-	apiName: string = "",
+	name: string = "",
 ): Promise<ApiManifest> {
 	const manifest: ApiManifest = {
 		lambdas: [],
@@ -88,7 +88,7 @@ export async function generateManifest(
 	for (const file of sortedFiles) {
 		const originalName = file.replace(/\.ts$/, "");
 		// Use prefixed bundle name for file lookup
-		const bundleName = apiName ? getLambdaBundleName(apiName, originalName) : originalName;
+		const bundleName = name ? getLambdaBundleName(name, originalName) : originalName;
 		const modulePath = isAbsolute(outputDir)
 			? join(outputDir, `${bundleName}.js`)
 			: join(process.cwd(), outputDir, `${bundleName}.js`);
@@ -126,11 +126,11 @@ export async function generateManifest(
 				// Determine which lambda should handle this route
 				let targetLambda = bundleName;
 
-				// OpenAPI routes always go to the __openapi__ lambda if enabled
+				// OpenAPI routes always go to __openapi__ lambda if enabled
 				if (openapiEnabled && path.startsWith("/openapi")) {
-					targetLambda = apiName ? getLambdaBundleName(apiName, "__openapi__") : "__openapi__";
+					targetLambda = name ? getLambdaBundleName(name, "__openapi__") : "__openapi__";
 				} else if (originalName === "__openapi__") {
-					// Skip non-openapi routes from the openapi aggregator lambda
+					// Skip non-openapi routes from openapi aggregator lambda
 					continue;
 				}
 

@@ -7,7 +7,7 @@ import type { PackageManager } from "./detect";
 
 export interface WizardAnswers {
 	targetDir: string;
-	apiName: string;
+	name: string;
 	packageManager: PackageManager;
 	installDeps: boolean;
 }
@@ -49,7 +49,7 @@ export async function promptTargetDirectory(
  */
 export async function runFreshProjectWizard(
 	apiName: string,
-): Promise<Omit<WizardAnswers, "targetDir" | "apiName"> | null> {
+): Promise<Omit<WizardAnswers, "targetDir"> | null> {
 	consola.info(`Creating new elysian project: ${apiName}\n`);
 
 	// Prompt for package manager
@@ -69,6 +69,7 @@ export async function runFreshProjectWizard(
 	}
 
 	return {
+		name: apiName,
 		packageManager: packageManager as PackageManager,
 		installDeps: true, // Always install for fresh projects
 	};
@@ -80,7 +81,7 @@ export async function runFreshProjectWizard(
 export async function runExistingProjectWizard(
 	apiName: string,
 	detectedPackageManager: PackageManager | null,
-): Promise<Omit<WizardAnswers, "targetDir" | "apiName"> | null> {
+): Promise<Omit<WizardAnswers, "targetDir"> | null> {
 	consola.info(`Adding elysian to: ${apiName}\n`);
 
 	// Use detected package manager or prompt
@@ -118,6 +119,7 @@ export async function runExistingProjectWizard(
 	}
 
 	return {
+		name: apiName,
 		packageManager,
 		installDeps: installDeps as boolean,
 	};

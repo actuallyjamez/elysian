@@ -69,7 +69,7 @@ export const buildCommand = defineCommand({
 			process.exit(1);
 		}
 
-		const apiName = config.apiName;
+		const name = config.name;
 		const lambdasDir = join(process.cwd(), config.lambdasDir);
 		const outputDir = join(process.cwd(), config.outputDir);
 		const terraformDir = join(process.cwd(), config.terraform.outputDir);
@@ -110,7 +110,7 @@ export const buildCommand = defineCommand({
 
 		for (const file of lambdaFiles) {
 			const name = file.replace(/\.ts$/, "");
-			const bundleName = getLambdaBundleName(apiName, name);
+			const bundleName = getLambdaBundleName(name, name);
 			const inputPath = join(lambdasDir, file);
 
 			// Create wrapper entry that imports the original and exports handler
@@ -144,7 +144,7 @@ export const buildCommand = defineCommand({
 
 		for (const file of lambdaFiles) {
 			const name = file.replace(/\.ts$/, "");
-			const bundleName = getLambdaBundleName(apiName, name);
+			const bundleName = getLambdaBundleName(name, name);
 			const jsPath = join(outputDir, `${bundleName}.js`);
 
 			const result = await packageLambda(bundleName, jsPath, outputDir);
@@ -170,7 +170,7 @@ export const buildCommand = defineCommand({
 				lambdaFiles,
 				outputDir,
 				config.openapi.enabled,
-				apiName,
+				name,
 			);
 
 			// Write JSON manifest
@@ -192,8 +192,8 @@ export const buildCommand = defineCommand({
 			const routesByLambda = new Map<string, typeof manifest.routes>();
 			for (const route of manifest.routes) {
 				// Extract display name (original name) from bundle name
-				const displayName = route.lambda.startsWith(`${apiName}-`)
-					? route.lambda.slice(apiName.length + 1)
+				const displayName = route.lambda.startsWith(`${name}-`)
+					? route.lambda.slice(name.length + 1)
 					: route.lambda;
 				const existing = routesByLambda.get(displayName) || [];
 				existing.push(route);
