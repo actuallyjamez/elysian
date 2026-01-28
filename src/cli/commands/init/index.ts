@@ -4,6 +4,7 @@
 
 export { detectProject, type ProjectInfo, type PackageManager } from "./detect";
 export {
+	promptTargetDirectory,
 	runFreshProjectWizard,
 	runExistingProjectWizard,
 	type WizardAnswers,

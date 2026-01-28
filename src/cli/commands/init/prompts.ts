@@ -3,9 +3,10 @@
  */
 
 import consola from "consola";
-import type { PackageManager, ProjectInfo } from "./detect";
+import type { PackageManager } from "./detect";
 
 export interface WizardAnswers {
+	targetDir: string;
 	apiName: string;
 	packageManager: PackageManager;
 	installDeps: boolean;
@@ -21,25 +22,35 @@ function isCancelled(value: unknown): boolean {
 }
 
 /**
- * Run wizard for a fresh (empty) project
+ * Run the initial wizard to get the target directory
+ * Returns the target directory path, or null if cancelled
  */
-export async function runFreshProjectWizard(
-	info: ProjectInfo,
-): Promise<WizardAnswers | null> {
+export async function promptTargetDirectory(
+	currentDirName: string,
+): Promise<string | null> {
 	console.log("");
-	consola.info("Creating a new elysian project...\n");
 
-	// Prompt for API name
-	const apiName = await consola.prompt("API name:", {
+	const targetDir = await consola.prompt("Where would you like to create your project?", {
 		type: "text",
-		default: info.directoryName,
-		placeholder: info.directoryName,
+		default: ".",
+		placeholder: ". (current directory)",
 		cancel: "symbol",
 	});
 
-	if (isCancelled(apiName)) {
+	if (isCancelled(targetDir)) {
 		return null;
 	}
+
+	return targetDir as string;
+}
+
+/**
+ * Run wizard for a fresh (empty) project
+ */
+export async function runFreshProjectWizard(
+	apiName: string,
+): Promise<Omit<WizardAnswers, "targetDir" | "apiName"> | null> {
+	consola.info(`Creating new elysian project: ${apiName}\n`);
 
 	// Prompt for package manager
 	const packageManager = await consola.prompt("Package manager:", {
@@ -58,7 +69,6 @@ export async function runFreshProjectWizard(
 	}
 
 	return {
-		apiName: apiName as string,
 		packageManager: packageManager as PackageManager,
 		installDeps: true, // Always install for fresh projects
 	};
@@ -68,30 +78,15 @@ export async function runFreshProjectWizard(
  * Run wizard for an existing project
  */
 export async function runExistingProjectWizard(
-	info: ProjectInfo,
-): Promise<WizardAnswers | null> {
-	console.log("");
-	consola.info("Adding elysian to existing project...\n");
-
-	// Use package.json name as default, fallback to directory name
-	const defaultName = info.packageName || info.directoryName;
-
-	// Prompt for API name
-	const apiName = await consola.prompt("API name:", {
-		type: "text",
-		default: defaultName,
-		placeholder: defaultName,
-		cancel: "symbol",
-	});
-
-	if (isCancelled(apiName)) {
-		return null;
-	}
+	apiName: string,
+	detectedPackageManager: PackageManager | null,
+): Promise<Omit<WizardAnswers, "targetDir" | "apiName"> | null> {
+	consola.info(`Adding elysian to: ${apiName}\n`);
 
 	// Use detected package manager or prompt
 	let packageManager: PackageManager;
-	if (info.packageManager) {
-		packageManager = info.packageManager;
+	if (detectedPackageManager) {
+		packageManager = detectedPackageManager;
 		consola.info(`Detected package manager: ${packageManager}`);
 	} else {
 		const selected = await consola.prompt("Package manager:", {
@@ -123,7 +118,6 @@ export async function runExistingProjectWizard(
 	}
 
 	return {
-		apiName: apiName as string,
 		packageManager,
 		installDeps: installDeps as boolean,
 	};
