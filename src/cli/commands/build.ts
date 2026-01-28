@@ -18,6 +18,7 @@ import {
 } from "../../core/openapi";
 import { createWrapperEntry } from "../../core/handler-wrapper";
 import { getLambdaBundleName } from "../../core/naming";
+import { version } from "../../core/version";
 
 function formatDuration(ms: number): string {
 	if (ms < 1000) return `${ms}ms`;
@@ -53,7 +54,7 @@ export const buildCommand = defineCommand({
 		// Header
 		console.log();
 		console.log(
-			`  ${pc.bold(pc.cyan("elysian"))} ${pc.dim("v0.1.0")} ${args.prod ? pc.yellow("production") : pc.dim("development")}`,
+			`  ${pc.bold(pc.cyan("elysian"))} ${pc.dim(`v${version}`)} ${args.prod ? pc.yellow("production") : pc.dim("development")}`,
 		);
 		console.log();
 
