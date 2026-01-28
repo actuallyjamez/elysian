@@ -3,9 +3,9 @@
  */
 
 import { defineCommand } from "citty";
-import consola from "consola";
 import { readdirSync, mkdirSync, existsSync } from "fs";
 import { join } from "path";
+import pc from "picocolors";
 import { loadConfig } from "../../core/config";
 import { bundleLambda } from "../../core/bundler";
 import { packageLambda } from "../../core/packager";
@@ -17,6 +17,18 @@ import {
 	cleanupOpenApiLambda,
 } from "../../core/openapi";
 import { createWrapperEntry } from "../../core/handler-wrapper";
+import { getLambdaBundleName } from "../../core/naming";
+
+function formatDuration(ms: number): string {
+	if (ms < 1000) return `${ms}ms`;
+	return `${(ms / 1000).toFixed(2)}s`;
+}
+
+function formatSize(bytes: number): string {
+	if (bytes < 1024) return `${bytes} B`;
+	if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+	return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+}
 
 export const buildCommand = defineCommand({
 	meta: {
@@ -38,23 +50,32 @@ export const buildCommand = defineCommand({
 			process.env.NODE_ENV = "production";
 		}
 
-		consola.start("Loading configuration...");
+		// Header
+		console.log();
+		console.log(
+			`  ${pc.bold(pc.cyan("elysian"))} ${pc.dim("v0.1.0")} ${args.prod ? pc.yellow("production") : pc.dim("development")}`,
+		);
+		console.log();
 
+		// Load config
 		let config;
 		try {
 			config = await loadConfig();
 		} catch (error) {
-			consola.error(error instanceof Error ? error.message : error);
+			console.log(
+				`  ${pc.red("✗")} ${error instanceof Error ? error.message : error}`,
+			);
 			process.exit(1);
 		}
 
+		const apiName = config.apiName;
 		const lambdasDir = join(process.cwd(), config.lambdasDir);
 		const outputDir = join(process.cwd(), config.outputDir);
 		const terraformDir = join(process.cwd(), config.terraform.outputDir);
 
 		// Ensure directories exist
 		if (!existsSync(lambdasDir)) {
-			consola.error(`Lambdas directory not found: ${lambdasDir}`);
+			console.log(`  ${pc.red("✗")} Lambdas directory not found: ${lambdasDir}`);
 			process.exit(1);
 		}
 
@@ -67,29 +88,28 @@ export const buildCommand = defineCommand({
 		);
 
 		if (lambdaFiles.length === 0) {
-			consola.warn("No lambda files found in", config.lambdasDir);
+			console.log(`  ${pc.yellow("!")} No lambda files found in ${config.lambdasDir}`);
 			return;
 		}
 
-		consola.info(`Found ${lambdaFiles.length} lambda(s) to build`);
-
 		// Generate OpenAPI aggregator if enabled
 		if (shouldGenerateOpenApi(config)) {
-			consola.start("Generating OpenAPI aggregator...");
 			await writeOpenApiLambda(lambdaFiles, lambdasDir, config);
 			lambdaFiles.push("__openapi__.ts");
 		}
 
-		// Build each lambda
-		consola.start("Bundling lambdas...");
+		// Build phase
+		console.log(`  ${pc.green("✓")} Compiling ${lambdaFiles.length} lambdas...`);
 
 		const tempDir = join(outputDir, "__temp__");
 		mkdirSync(tempDir, { recursive: true });
 
-		const buildResults: Array<{ name: string; success: boolean; error?: string }> = [];
+		const buildResults: Array<{ name: string; bundleName: string; success: boolean; error?: string }> =
+			[];
 
 		for (const file of lambdaFiles) {
 			const name = file.replace(/\.ts$/, "");
+			const bundleName = getLambdaBundleName(apiName, name);
 			const inputPath = join(lambdasDir, file);
 
 			// Create wrapper entry that imports the original and exports handler
@@ -97,16 +117,14 @@ export const buildCommand = defineCommand({
 			const wrapperContent = createWrapperEntry(inputPath);
 			await Bun.write(wrapperPath, wrapperContent);
 
-			// Bundle the wrapper
-			const result = await bundleLambda(name, wrapperPath, outputDir, config);
+			// Bundle the wrapper with prefixed name
+			const result = await bundleLambda(bundleName, wrapperPath, outputDir, config);
+			buildResults.push({ ...result, name, bundleName });
 
-			if (result.success) {
-				consola.success(`Built ${name}.js`);
-			} else {
-				consola.error(`Failed to build ${name}: ${result.error}`);
+			if (!result.success) {
+				console.log(`  ${pc.red("✗")} Failed to build ${name}: ${result.error}`);
+				process.exit(1);
 			}
-
-			buildResults.push(result);
 		}
 
 		// Clean up temp directory
@@ -118,72 +136,118 @@ export const buildCommand = defineCommand({
 			await cleanupOpenApiLambda(lambdasDir);
 		}
 
-		// Check for build failures
-		const failures = buildResults.filter((r) => !r.success);
-		if (failures.length > 0) {
-			consola.error(`${failures.length} lambda(s) failed to build`);
-			process.exit(1);
-		}
+		// Package phase
+		console.log(`  ${pc.green("✓")} Packaging lambdas...`);
 
-		// Package each lambda into zip
-		consola.start("Packaging lambdas...");
+		const packageSizes: Map<string, number> = new Map();
 
 		for (const file of lambdaFiles) {
 			const name = file.replace(/\.ts$/, "");
-			const jsPath = join(outputDir, `${name}.js`);
-			const result = await packageLambda(name, jsPath, outputDir);
+			const bundleName = getLambdaBundleName(apiName, name);
+			const jsPath = join(outputDir, `${bundleName}.js`);
 
-			if (result.success) {
-				consola.success(`Packaged ${name}.zip`);
-			} else {
-				consola.error(`Failed to package ${name}: ${result.error}`);
+			const result = await packageLambda(bundleName, jsPath, outputDir);
+
+			if (!result.success) {
+				console.log(`  ${pc.red("✗")} Failed to package ${name}: ${result.error}`);
 				process.exit(1);
+			}
+
+			// Get zip size (store by original name for display)
+			const zipPath = join(outputDir, `${bundleName}.zip`);
+			const stat = await Bun.file(zipPath).stat();
+			if (stat) {
+				packageSizes.set(name, stat.size);
 			}
 		}
 
 		// Generate manifest
-		consola.start("Generating route manifest...");
+		console.log(`  ${pc.green("✓")} Generating manifest...`);
 
 		try {
 			const manifest = await generateManifest(
 				lambdaFiles,
 				outputDir,
 				config.openapi.enabled,
+				apiName,
 			);
 
 			// Write JSON manifest
 			const manifestPath = join(outputDir, "manifest.json");
 			await writeManifest(manifest, manifestPath);
-			consola.success("Generated manifest.json");
 
 			// Write Terraform variables
-			const tfvarsPath = await writeTerraformVars(manifest, config);
-			consola.success(`Generated ${config.terraform.tfvarsFilename}`);
+			await writeTerraformVars(manifest, config);
 
-			// Print summary
-			const duration = ((Date.now() - startTime) / 1000).toFixed(2);
-			console.log("");
-			consola.box(
-				`Build complete in ${duration}s\n\n` +
-					`Lambdas: ${manifest.lambdas.length}\n` +
-					`Routes:  ${manifest.routes.length}\n\n` +
-					`Output:  ${config.outputDir}/\n` +
-					`Terraform: ${config.terraform.outputDir}/${config.terraform.tfvarsFilename}`,
-			);
+			// Duration
+			const duration = Date.now() - startTime;
 
-			// Print route summary
-			console.log("\nRoute Summary:");
+			// Route table header
+			console.log();
+			console.log(`  ${pc.bold("Routes")}`);
+			console.log();
+
+			// Group routes by lambda (use original name for display)
+			const routesByLambda = new Map<string, typeof manifest.routes>();
 			for (const route of manifest.routes) {
-				const params =
-					route.pathParameters.length > 0
-						? ` [${route.pathParameters.join(", ")}]`
-						: "";
-				console.log(
-					`  ${route.method.padEnd(6)} ${route.path.padEnd(30)} → ${route.lambda}${params}`,
-				);
+				// Extract display name (original name) from bundle name
+				const displayName = route.lambda.startsWith(`${apiName}-`)
+					? route.lambda.slice(apiName.length + 1)
+					: route.lambda;
+				const existing = routesByLambda.get(displayName) || [];
+				existing.push(route);
+				routesByLambda.set(displayName, existing);
 			}
+
+			// Method colors
+			const methodColor = (method: string) => {
+				switch (method) {
+					case "GET":
+						return pc.green;
+					case "POST":
+						return pc.blue;
+					case "PUT":
+						return pc.yellow;
+					case "DELETE":
+						return pc.red;
+					case "PATCH":
+						return pc.magenta;
+					default:
+						return pc.white;
+				}
+			};
+
+			// Find longest path for alignment
+			const maxPathLen = Math.max(...manifest.routes.map((r) => r.path.length));
+
+			for (const [displayName, routes] of routesByLambda) {
+				const size = packageSizes.get(displayName);
+				const sizeStr = size ? pc.dim(` (${formatSize(size)})`) : "";
+				console.log(`  ${pc.dim("λ")} ${pc.bold(displayName)}${sizeStr}`);
+
+				for (const route of routes) {
+					const method = methodColor(route.method)(route.method.padEnd(6));
+					const path = route.path.padEnd(maxPathLen + 2);
+					const params =
+						route.pathParameters.length > 0
+							? pc.dim(` [${route.pathParameters.join(", ")}]`)
+							: "";
+					console.log(`    ${method} ${path}${params}`);
+				}
+				console.log();
+			}
+
+			// Summary footer
+			console.log(pc.dim("  " + "─".repeat(40)));
+			console.log();
+			console.log(
+				`  ${pc.green("✓")} Compiled ${pc.bold(String(manifest.lambdas.length))} lambdas (${manifest.routes.length} routes) in ${pc.bold(formatDuration(duration))}`,
+			);
+			console.log();
 		} catch (error) {
-			consola.error(error instanceof Error ? error.message : error);
+			console.log(
+				`  ${pc.red("✗")} ${error instanceof Error ? error.message : String(error)}`,
+			);
 			process.exit(1);
 		}
 	},

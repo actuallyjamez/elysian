@@ -10,6 +10,7 @@ import { loadConfig, type ResolvedConfig } from "../../core/config";
 import { bundleLambda } from "../../core/bundler";
 import { packageLambda } from "../../core/packager";
 import { createWrapperEntry } from "../../core/handler-wrapper";
+import { getLambdaBundleName } from "../../core/naming";
 
 export const devCommand = defineCommand({
 	meta: {
@@ -34,6 +35,7 @@ export const devCommand = defineCommand({
 			process.exit(1);
 		}
 
+		const apiName = config.apiName;
 		const lambdasDir = join(process.cwd(), config.lambdasDir);
 		const outputDir = join(process.cwd(), config.outputDir);
 		const tempDir = join(outputDir, "__temp__");
@@ -59,6 +61,7 @@ export const devCommand = defineCommand({
 		// Build function for a single lambda
 		async function buildSingleLambda(filename: string): Promise<boolean> {
 			const name = filename.replace(/\.ts$/, "");
+			const bundleName = getLambdaBundleName(apiName, name);
 			const inputPath = join(lambdasDir, filename);
 
 			// Create wrapper entry
@@ -66,27 +69,27 @@ export const devCommand = defineCommand({
 			const wrapperContent = createWrapperEntry(inputPath);
 			await Bun.write(wrapperPath, wrapperContent);
 
-			// Bundle
-			const buildResult = await bundleLambda(name, wrapperPath, outputDir, config);
+			// Bundle with prefixed name
+			const buildResult = await bundleLambda(bundleName, wrapperPath, outputDir, config);
 
 			if (!buildResult.success) {
 				consola.error(`Failed to build ${name}: ${buildResult.error}`);
 				return false;
 			}
 
-			consola.success(`Built ${name}.js`);
+			consola.success(`Built ${bundleName}.js`);
 
 			// Package if not disabled
 			if (!args["no-package"]) {
-				const jsPath = join(outputDir, `${name}.js`);
-				const packageResult = await packageLambda(name, jsPath, outputDir);
+				const jsPath = join(outputDir, `${bundleName}.js`);
+				const packageResult = await packageLambda(bundleName, jsPath, outputDir);
 
 				if (!packageResult.success) {
 					consola.error(`Failed to package ${name}: ${packageResult.error}`);
 					return false;
 				}
 
-				consola.success(`Packaged ${name}.zip`);
+				consola.success(`Packaged ${bundleName}.zip`);
 			}
 
 			return true;

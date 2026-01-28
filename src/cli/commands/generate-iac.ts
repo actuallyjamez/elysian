@@ -9,6 +9,7 @@ import { join } from "path";
 import { loadConfig } from "../../core/config";
 import { generateManifest, writeManifest } from "../../core/manifest";
 import { writeTerraformVars } from "../../core/terraform";
+import { getOriginalLambdaName } from "../../core/naming";
 
 export const generateIacCommand = defineCommand({
 	meta: {
@@ -27,13 +28,14 @@ export const generateIacCommand = defineCommand({
 			process.exit(1);
 		}
 
+		const apiName = config.apiName;
 		const outputDir = join(process.cwd(), config.outputDir);
 		const terraformDir = join(process.cwd(), config.terraform.outputDir);
 
 		// Check that build output exists
 		if (!existsSync(outputDir)) {
 			consola.error(
-				`Build output directory not found: ${outputDir}\nRun 'elysia-apigw build' first.`,
+				`Build output directory not found: ${outputDir}\nRun 'elysian build' first.`,
 			);
 			process.exit(1);
 		}
@@ -41,20 +43,25 @@ export const generateIacCommand = defineCommand({
 		// Ensure terraform directory exists
 		mkdirSync(terraformDir, { recursive: true });
 
-		// Get built lambda files
+		// Get built lambda files (they have the apiName prefix)
 		const jsFiles = readdirSync(outputDir).filter(
 			(f) => f.endsWith(".js") && !f.startsWith("__temp__"),
 		);
 
 		if (jsFiles.length === 0) {
 			consola.error(
-				`No built lambda files found in ${outputDir}\nRun 'elysia-apigw build' first.`,
+				`No built lambda files found in ${outputDir}\nRun 'elysian build' first.`,
 			);
 			process.exit(1);
 		}
 
-		// Convert to .ts names for manifest generation compatibility
-		const lambdaFiles = jsFiles.map((f) => f.replace(/\.js$/, ".ts"));
+		// Convert bundle names back to .ts names for manifest generation
+		// The manifest generator will re-add the prefix
+		const lambdaFiles = jsFiles.map((f) => {
+			const bundleName = f.replace(/\.js$/, "");
+			const originalName = getOriginalLambdaName(apiName, bundleName);
+			return `${originalName}.ts`;
+		});
 
 		consola.info(`Found ${lambdaFiles.length} built lambda(s)`);
 
@@ -66,6 +73,7 @@ export const generateIacCommand = defineCommand({
 				lambdaFiles,
 				outputDir,
 				config.openapi.enabled,
+				apiName,
 			);
 
 			// Write JSON manifest

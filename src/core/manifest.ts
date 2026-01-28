@@ -3,6 +3,7 @@
  */
 
 import { join, isAbsolute } from "path";
+import { getLambdaBundleName } from "./naming";
 
 export interface RouteInfo {
 	method: string;
@@ -72,6 +73,7 @@ export async function generateManifest(
 	lambdaFiles: string[],
 	outputDir: string,
 	openapiEnabled: boolean = true,
+	apiName: string = "",
 ): Promise<ApiManifest> {
 	const manifest: ApiManifest = {
 		lambdas: [],
@@ -84,16 +86,18 @@ export async function generateManifest(
 	const sortedFiles = [...lambdaFiles].sort();
 
 	for (const file of sortedFiles) {
-		const name = file.replace(/\.ts$/, "");
+		const originalName = file.replace(/\.ts$/, "");
+		// Use prefixed bundle name for file lookup
+		const bundleName = apiName ? getLambdaBundleName(apiName, originalName) : originalName;
 		const modulePath = isAbsolute(outputDir)
-			? join(outputDir, `${name}.js`)
-			: join(process.cwd(), outputDir, `${name}.js`);
+			? join(outputDir, `${bundleName}.js`)
+			: join(process.cwd(), outputDir, `${bundleName}.js`);
 
 		// Add cache-busting query param to force fresh import
 		const module = await import(`${modulePath}?t=${Date.now()}`);
 
 		const lambdaManifest: LambdaManifest = {
-			name,
+			name: bundleName,
 			routes: [],
 		};
 
@@ -120,12 +124,12 @@ export async function generateManifest(
 				});
 
 				// Determine which lambda should handle this route
-				let targetLambda = name;
+				let targetLambda = bundleName;
 
 				// OpenAPI routes always go to the __openapi__ lambda if enabled
 				if (openapiEnabled && path.startsWith("/openapi")) {
-					targetLambda = "__openapi__";
-				} else if (name === "__openapi__") {
+					targetLambda = apiName ? getLambdaBundleName(apiName, "__openapi__") : "__openapi__";
+				} else if (originalName === "__openapi__") {
 					// Skip non-openapi routes from the openapi aggregator lambda
 					continue;
 				}
