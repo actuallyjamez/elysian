@@ -77,7 +77,6 @@ export const initCommand = defineCommand({
 			}
 			answers = {
 				targetDir,
-				name,
 				...result,
 			};
 		} else {
@@ -88,7 +87,6 @@ export const initCommand = defineCommand({
 			}
 			answers = {
 				targetDir,
-				name,
 				...result,
 			};
 		}
