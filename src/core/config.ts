@@ -23,7 +23,7 @@ export interface BuildConfig {
 }
 
 export interface LambdaConfig {
-	/** Lambda runtime (default: "nodejs20.x") */
+	/** Lambda runtime (default: "nodejs22.x") */
 	runtime?: string;
 	/** Lambda memory size in MB (default: 256) */
 	memorySize?: number;
@@ -86,7 +86,7 @@ const DEFAULT_CONFIG: Omit<ResolvedConfig, "apiName"> = {
 		external: ["@aws-sdk/*"],
 	},
 	lambda: {
-		runtime: "nodejs20.x",
+		runtime: "nodejs22.x",
 		memorySize: 256,
 		timeout: 30,
 	},

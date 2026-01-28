@@ -49,37 +49,14 @@ export const initCommand = defineCommand({
 		consola.success("Created src/lambdas/");
 		consola.success("Created terraform/");
 
-		// Write config file
+		// Write config file - minimal required config
 		const configContent = `import { defineConfig } from "@actuallyjamez/elysian";
 
 export default defineConfig({
 	apiName: "${apiName}",
-
-	// Lambda source directory
-	lambdasDir: "src/lambdas",
-
-	// Build output directory
-	outputDir: "dist",
-
-	// OpenAPI configuration
 	openapi: {
-		enabled: true,
 		title: "${apiName}",
 		version: "1.0.0",
-		description: "API powered by Elysia and AWS Lambda",
-	},
-
-	// Terraform configuration
-	terraform: {
-		outputDir: "terraform",
-		tfvarsFilename: "api-routes.auto.tfvars",
-	},
-
-	// Lambda defaults
-	lambda: {
-		runtime: "nodejs20.x",
-		memorySize: 256,
-		timeout: 30,
 	},
 });
 `;
@@ -92,14 +69,6 @@ export default defineConfig({
 		if (!existsSync(exampleLambdaPath) || args.force) {
 			const exampleLambdaContent = `import { createLambda, t } from "@actuallyjamez/elysian";
 
-/**
- * Example Lambda - Hello World
- *
- * Routes defined here will be automatically:
- * - Bundled into a Lambda function
- * - Mapped to API Gateway routes
- * - Included in OpenAPI documentation
- */
 export default createLambda()
 	.get("/hello", ({ query }) => {
 		return \`Hello, \${query.name ?? "World"}!\`;
@@ -110,7 +79,6 @@ export default createLambda()
 		}),
 		detail: {
 			summary: "Say hello",
-			description: "Returns a greeting message",
 			tags: ["Greeting"],
 		},
 	});
@@ -127,7 +95,7 @@ export default createLambda()
   required_providers {
     aws = {
       source  = "hashicorp/aws"
-      version = "~> 5.0"
+      version = "~> 6.0"
     }
   }
 }
@@ -157,7 +125,7 @@ variable "api_routes" {
 
 variable "lambda_runtime" {
   type    = string
-  default = "nodejs20.x"
+  default = "nodejs22.x"
 }
 
 variable "lambda_memory_size" {
@@ -194,7 +162,6 @@ locals {
 resource "aws_apigatewayv2_api" "this" {
   name          = var.api_name
   protocol_type = "HTTP"
-  description   = "API Gateway for \${var.api_name}"
   tags          = var.tags
 }
 
@@ -226,7 +193,7 @@ resource "aws_lambda_function" "this" {
   for_each = local.lambda_functions
 
   filename         = each.value.filename
-  function_name    = "\${var.api_name}-\${each.key}"
+  function_name    = each.key
   role             = aws_iam_role.lambda.arn
   handler          = each.value.handler
   source_code_hash = each.value.source_code_hash
@@ -241,10 +208,10 @@ resource "aws_lambda_function" "this" {
 resource "aws_apigatewayv2_integration" "this" {
   for_each = local.lambda_functions
 
-  api_id             = aws_apigatewayv2_api.this.id
-  integration_type   = "AWS_PROXY"
-  integration_uri    = aws_lambda_function.this[each.key].invoke_arn
-  integration_method = "POST"
+  api_id                 = aws_apigatewayv2_api.this.id
+  integration_type       = "AWS_PROXY"
+  integration_uri        = aws_lambda_function.this[each.key].invoke_arn
+  integration_method     = "POST"
   payload_format_version = "2.0"
 }
 
@@ -252,7 +219,7 @@ resource "aws_apigatewayv2_integration" "this" {
 resource "aws_lambda_permission" "apigateway" {
   for_each = local.lambda_functions
 
-  statement_id  = "AllowExecutionFromAPIGateway-\${each.key}"
+  statement_id  = "AllowAPIGateway"
   action        = "lambda:InvokeFunction"
   function_name = aws_lambda_function.this[each.key].function_name
   principal     = "apigateway.amazonaws.com"
@@ -273,22 +240,11 @@ resource "aws_apigatewayv2_stage" "this" {
   api_id      = aws_apigatewayv2_api.this.id
   name        = "$default"
   auto_deploy = true
-
-  tags = var.tags
-
-  depends_on = [
-    aws_apigatewayv2_route.this,
-    aws_lambda_permission.apigateway
-  ]
+  tags        = var.tags
 }
 
-# Outputs
 output "api_endpoint" {
   value = aws_apigatewayv2_stage.this.invoke_url
-}
-
-output "lambda_functions" {
-  value = { for k, v in aws_lambda_function.this : k => v.arn }
 }
 `;
 
@@ -301,13 +257,9 @@ output "lambda_functions" {
 		consola.box(
 			"Project initialized!\n\n" +
 				"Next steps:\n\n" +
-				"1. Install dependencies:\n" +
-				"   bun add elysia @actuallyjamez/elysian\n\n" +
-				"2. Add more lambdas in src/lambdas/\n\n" +
-				"3. Build your lambdas:\n" +
-				"   bunx elysian build\n\n" +
-				"4. Deploy with Terraform:\n" +
-				"   cd terraform && terraform init && terraform apply",
+				"1. bun add elysia @actuallyjamez/elysian\n\n" +
+				"2. bun run elysian build\n\n" +
+				"3. cd terraform && terraform init && terraform apply",
 		);
 	},
 });
