@@ -1,6 +1,6 @@
 {
 	"name": "@actuallyjamez/elysian",
-	"version": "0.6.0",
+	"version": "0.7.0",
 	"description": "Automatic Lambda bundler for Elysia with API Gateway and Terraform integration",
 	"type": "module",
 	"main": "./dist/index.js",

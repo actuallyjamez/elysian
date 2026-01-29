@@ -1,5 +1,11 @@
 # @actuallyjamez/elysian
 
+## 0.7.0
+
+### Minor Changes
+
+- [`40db40c`](https://github.com/actuallyjamez/elysian/commit/40db40c89fe9993d40e15e3979e3b30b352056a5) Thanks [@github-actions[bot]](https://github.com/github-actions%5Bbot%5D)! - fix deploy failed in dev when lambdas are updated
+
 ## 0.6.0
 
 ### Minor Changes
