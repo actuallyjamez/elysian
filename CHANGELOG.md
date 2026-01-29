@@ -1,5 +1,13 @@
 # @actuallyjamez/elysian
 
+## 0.5.1
+
+### Patch Changes
+
+- [`f4f9f03`](https://github.com/actuallyjamez/elysian/commit/f4f9f03e4a4a5197089266b79524d87faa0f1d9c) Thanks [@github-actions[bot]](https://github.com/github-actions%5Bbot%5D)! - fix manifest generation
+
+- [`77acc02`](https://github.com/actuallyjamez/elysian/commit/77acc025ad309a4cafc69450611021fb887c4da9) Thanks [@github-actions[bot]](https://github.com/github-actions%5Bbot%5D)! - remove extra new line on init
+
 ## 0.5.0
 
 ### Minor Changes
