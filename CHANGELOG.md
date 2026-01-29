@@ -1,5 +1,11 @@
 # @actuallyjamez/elysian
 
+## 0.11.0
+
+### Minor Changes
+
+- [`439d217`](https://github.com/actuallyjamez/elysian/commit/439d217a1bb96d75570813fdbfc8e58f9b5f446b) Thanks [@github-actions[bot]](https://github.com/github-actions%5Bbot%5D)! - display openapi url
+
 ## 0.10.0
 
 ### Minor Changes
