@@ -72,6 +72,12 @@ variable "region" {
   type    = string
   default = "eu-west-2"
 }`,
+		dev_mode: `
+variable "dev_mode" {
+  type        = bool
+  default     = false
+  description = "Enable Live development mode (uses stub lambdas with AppSync)"
+}`,
 		lambda_names: `
 variable "lambda_names" {
   type    = list(string)
@@ -174,17 +180,29 @@ resource "aws_iam_role_policy_attachment" "elysian_lambda_basic" {
 }
 
 # Lambda Functions
+# In dev_mode: uses stub lambda with AppSync for live development
+# In prod: uses the actual bundled lambda code
 resource "aws_lambda_function" "elysian" {
   for_each = local.lambda_functions
 
-  filename         = each.value.filename
+  # Use stub in dev mode, real code otherwise
+  filename         = var.dev_mode ? local.stub_zip_path : each.value.filename
   function_name    = each.key
   role             = aws_iam_role.elysian_lambda.arn
   handler          = each.value.handler
-  source_code_hash = each.value.source_code_hash
+  source_code_hash = var.dev_mode ? local.stub_hash : each.value.source_code_hash
   runtime          = var.lambda_runtime
   memory_size      = var.lambda_memory_size
-  timeout          = var.lambda_timeout
+  timeout          = var.dev_mode ? 900 : var.lambda_timeout  # 15 min timeout in dev mode
+
+  environment {
+    variables = merge(
+      var.dev_mode ? merge(local.dev_environment, {
+        ELYSIAN_LAMBDA_NAME = each.key
+      }) : {},
+      {}
+    )
+  }
 
   tags = var.tags
 }
@@ -276,6 +294,12 @@ export const templates = {
 variable "region" {
   type    = string
   default = "eu-west-2"
+}
+
+variable "dev_mode" {
+  type        = bool
+  default     = false
+  description = "Enable Live development mode (uses stub lambdas with AppSync)"
 }
 
 variable "lambda_names" {

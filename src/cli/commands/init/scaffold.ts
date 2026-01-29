@@ -21,6 +21,11 @@ import {
 	appendMain,
 	appendOutputs,
 } from "./terraform";
+import {
+	templates as tfLiveTemplates,
+	hasAppSyncApi,
+	appendLiveOutputs,
+} from "./terraform-live";
 import { ui } from "../../ui";
 
 export interface ScaffoldResult {
@@ -185,14 +190,33 @@ async function scaffoldTerraform(
 	const outputsPath = join(tfDir, "outputs.tf");
 	if (info.terraformFiles.outputs) {
 		const existing = await readFileOrEmpty(outputsPath);
-		const updated = appendOutputs(existing);
+		// First add base outputs, then add live outputs
+		let updated = appendOutputs(existing);
+		updated = appendLiveOutputs(updated);
 		if (updated !== existing) {
 			await writeFile(outputsPath, updated, result, true);
 		} else {
 			result.skipped.push(outputsPath);
 		}
 	} else {
-		await writeFile(outputsPath, tfTemplates.outputs, result, false);
+		// Create new outputs.tf with both base and live outputs
+		const baseOutputs = tfTemplates.outputs;
+		const fullOutputs = appendLiveOutputs(baseOutputs);
+		await writeFile(outputsPath, fullOutputs, result, false);
+	}
+
+	// live.tf - Live mode AppSync resources
+	const livePath = join(tfDir, "live.tf");
+	if (existsSync(livePath)) {
+		const existing = await readFileOrEmpty(livePath);
+		if (!hasAppSyncApi(existing)) {
+			// Append live resources if AppSync API not found
+			await writeFile(livePath, existing + "\n" + tfLiveTemplates.live, result, true);
+		} else {
+			result.skipped.push(livePath);
+		}
+	} else {
+		await writeFile(livePath, tfLiveTemplates.live, result, false);
 	}
 }
 

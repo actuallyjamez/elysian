@@ -112,7 +112,7 @@ export const initCommand = defineCommand({
 		// Print next steps
 		ui.blank();
 		const pm = answers.packageManager;
-		const runCmd = pm === "npm" ? "npm run" : pm;
+		// const runCmd = pm === "npm" ? "npm run" : pm;
 
 		ui.success("Project initialized!");
 		ui.blank();
@@ -129,9 +129,7 @@ export const initCommand = defineCommand({
 			ui.blank();
 		}
 
-		console.log(`    ${runCmd} elysian build`);
-		ui.blank();
-		console.log(`    cd terraform && terraform init && terraform apply`);
+		console.log(`    ${pm} elysian dev`);
 		ui.blank();
 	},
 });

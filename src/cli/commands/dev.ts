@@ -1,13 +1,14 @@
 /**
- * Dev command - Watch mode with LocalStack integration
+ * Dev command - Live mode using AppSync Events bridge
  */
 
 import { defineCommand } from "citty";
 import { watch, readdirSync, mkdirSync, existsSync, rmSync } from "fs";
-import { join } from "path";
+import { join, basename } from "path";
 import { loadConfig, type ResolvedConfig } from "../../core/config";
 import { bundleLambda } from "../../core/bundler";
 import { packageLambda } from "../../core/packager";
+import { bundleStub, isStubBundled } from "../../core/stub-bundler";
 import { createWrapperEntry } from "../../core/handler-wrapper";
 import { getLambdaBundleName } from "../../core/naming";
 import { generateManifest, writeManifest } from "../../core/manifest";
@@ -19,34 +20,50 @@ import {
 import {
 	detectLocalStack,
 	isTerraformInitialized,
+	isTerraformInstalled,
 	runTfLocalInit,
-	runTfLocalApply,
-	getTerraformOutputs,
+	runTfLocalApplyDevMode,
+	runTerraformInit,
+	runTerraformApplyDevMode,
+	getLiveModeConfig,
+	getLiveModeConfigAws,
 } from "../../core/localstack";
+import { createAppSyncClient } from "../../core/appsync-client";
+import {
+	createWorkerRunner,
+	type WorkerRunner,
+} from "../../core/worker-runner";
 import { ui, pc, createSpinner, formatDuration } from "../ui";
 
 export const devCommand = defineCommand({
 	meta: {
 		name: "dev",
-		description: "Watch mode - rebuild lambdas on file changes with LocalStack deploy",
+		description: "Live mode - hot reload without redeploys",
 	},
 	args: {
-		"no-package": {
-			type: "boolean",
-			description: "Skip creating zip files (faster rebuilds)",
-			default: false,
-		},
 		"no-localstack": {
 			type: "boolean",
-			description: "Disable LocalStack integration",
+			description: "Skip LocalStack detection (use AWS credentials)",
+			default: false,
+		},
+		verbose: {
+			type: "boolean",
+			alias: "v",
+			description: "Enable verbose logging for debugging",
 			default: false,
 		},
 	},
 	async run({ args }) {
-		// Initial setup
 		ui.header(pc.dim("dev"));
 
-		// Load config
+		const startTime = Date.now();
+		const verbose = args.verbose;
+		const log = (message: string) => {
+			if (verbose) {
+				console.log(pc.dim(`[debug] ${message}`));
+			}
+		};
+
 		let config: ResolvedConfig;
 		try {
 			config = await loadConfig();
@@ -62,7 +79,6 @@ export const devCommand = defineCommand({
 		const terraformDir = join(process.cwd(), config.terraform.outputDir);
 		const tempDir = join(outputDir, "__temp__");
 
-		// Ensure directories exist
 		if (!existsSync(lambdasDir)) {
 			ui.error(`Lambdas directory not found: ${lambdasDir}`);
 			process.exit(1);
@@ -71,68 +87,317 @@ export const devCommand = defineCommand({
 		mkdirSync(outputDir, { recursive: true });
 		mkdirSync(tempDir, { recursive: true });
 
-		// Detect LocalStack
-		let localstackEnabled = false;
-
+		// Detect LocalStack (optional)
+		let usingLocalStack = false;
 		if (!args["no-localstack"]) {
 			const detection = await detectLocalStack();
-
 			if (detection.available) {
-				localstackEnabled = true;
+				usingLocalStack = true;
 				ui.success("LocalStack detected");
-
-				// Check if terraform is initialized
-				if (!isTerraformInitialized(terraformDir)) {
-					const spinner = createSpinner("Initializing terraform...").start();
-					const initResult = await runTfLocalInit(terraformDir);
-					if (!initResult.success) {
-						spinner.fail("tflocal init failed");
-						console.log(pc.dim(initResult.error));
-						ui.warn("Continuing without LocalStack deploy");
-						localstackEnabled = false;
-					} else {
-						spinner.succeed("Terraform initialized");
-					}
-				}
 			} else {
 				if (!detection.localstackRunning) {
-					ui.warn("LocalStack not running - skipping deploy");
+					ui.warn("LocalStack not running");
 				}
 				if (!detection.tfLocalInstalled) {
-					ui.warn("tflocal not installed - skipping deploy");
+					ui.warn("tflocal not installed");
 				}
 			}
 		}
 
-		// Get initial lambda files
-		let lambdaFiles = readdirSync(lambdasDir).filter(
-			(f) => f.endsWith(".ts") && !f.startsWith("__"),
-		);
-
-		if (lambdaFiles.length === 0) {
-			ui.warn(`No lambda files found in ${config.lambdasDir}`);
+		// Verify terraform is available when not using LocalStack
+		if (!usingLocalStack) {
+			const terraformAvailable = await isTerraformInstalled();
+			if (!terraformAvailable) {
+				ui.error("terraform CLI not found. Install terraform or use LocalStack.");
+				process.exit(1);
+			}
+			ui.info("Using AWS (ensure credentials are configured)");
 		}
 
-		// Track last terraform outputs and build info for display
-		let lastOutputs: Record<string, unknown> | null = null;
-		let lastBuildInfo: { lambdas: number; routes: number; duration: number } | null = null;
-		let lastError: string | null = null;
+		// Ensure terraform init
+		if (!isTerraformInitialized(terraformDir)) {
+			const spinner = createSpinner("Initializing terraform...").start();
+			const initResult = usingLocalStack
+				? await runTfLocalInit(terraformDir)
+				: await runTerraformInit(terraformDir);
+			if (!initResult.success) {
+				spinner.fail("Terraform init failed");
+				ui.error(initResult.error || "Unknown error");
+				process.exit(1);
+			}
+			spinner.succeed("Terraform initialized");
+		}
 
-		// Build function for a single lambda
-		async function buildSingleLambda(filename: string): Promise<{ success: boolean; error?: string }> {
+		// Build state
+		let lambdaFiles = listLambdaFiles();
+		log(`Found ${lambdaFiles.length} lambda files: ${lambdaFiles.join(", ")}`);
+		let workerRunner: WorkerRunner;
+		let lastError: string | null = null;
+		let lastBuildInfo: {
+			lambdas: number;
+			routes: number;
+			duration: number;
+		} | null = null;
+		let lambdaWatcher: ReturnType<typeof watch> | null = null;
+		let terraformWatcher: ReturnType<typeof watch> | null = null;
+		let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+		let pendingTrigger: string | null = null;
+		let pendingBuildType: "lambda" | "terraform" = "lambda";
+		const DEBOUNCE_MS = 100;
+
+		// Bundle stub and lambdas BEFORE terraform apply (terraform needs the stub zip)
+		const initialBuildResult = await bundleAll();
+		if (!initialBuildResult.success) {
+			ui.error(`Initial build failed: ${initialBuildResult.error}`);
+			process.exit(1);
+		}
+		log(`Initial build completed: ${initialBuildResult.count} lambdas`);
+
+		// Generate manifest and terraform vars
+		const manifestResult = await generateManifestFiles();
+		if (!manifestResult.success) {
+			ui.error(`Manifest generation failed: ${manifestResult.error}`);
+			process.exit(1);
+		}
+
+		// Now we can provision infrastructure (stub zip exists)
+		let liveConfig = await ensureInfrastructure();
+		log(`Live config: API=${liveConfig.apiEndpoint}, AppSync HTTP=${liveConfig.appSyncHttpEndpoint}`);
+
+		workerRunner = createWorkerRunner({
+			outputDir,
+			appName: name,
+			onError: (lambdaName, error) => {
+				ui.warn(`${lambdaName}: ${error.message}`);
+			},
+		});
+
+		const appsyncClient = await startBridge(workerRunner, liveConfig);
+
+		// Load workers for all lambdas
+		await workerRunner.reloadAll();
+
+		lastBuildInfo = {
+			lambdas: initialBuildResult.count,
+			routes: manifestResult.routes,
+			duration: Date.now() - startTime,
+		};
+
+		watchFiles();
+		showReadyScreen();
+
+		process.on("SIGINT", async () => {
+			ui.blank();
+			ui.info("Stopping...");
+			appsyncClient?.disconnect();
+			workerRunner?.terminate();
+			lambdaWatcher?.close();
+			terraformWatcher?.close?.();
+			cleanupTemp();
+			process.exit(0);
+		});
+
+		await new Promise(() => {});
+
+		function listLambdaFiles(): string[] {
+			return readdirSync(lambdasDir).filter(
+				(f) => f.endsWith(".ts") && !f.startsWith("__"),
+			);
+		}
+
+		async function ensureInfrastructure(spinnerLabel: string | null = "Initializing...") {
+			const spinner = spinnerLabel ? createSpinner(spinnerLabel).start() : null;
+			const applyResult = usingLocalStack
+				? await runTfLocalApplyDevMode(terraformDir)
+				: await runTerraformApplyDevMode(terraformDir);
+			if (!applyResult.success) {
+				spinner?.fail("Terraform apply failed");
+				ui.error(applyResult.error || "Unknown terraform error");
+				process.exit(1);
+			}
+			spinner?.succeed("Initialized");
+
+			const config = usingLocalStack
+				? await getLiveModeConfig(terraformDir, true)
+				: await getLiveModeConfigAws(terraformDir);
+			if (!config) {
+				ui.error("Live mode outputs missing. Run `elysian init` again?");
+				process.exit(1);
+			}
+			return config;
+		}
+
+		async function startBridge(runner: WorkerRunner, config: Awaited<ReturnType<typeof ensureInfrastructure>>) {
+			const spinner = createSpinner("Connecting to AppSync...").start();
+			log(`Connecting to AppSync realtime: ${config.appSyncRealtimeEndpoint}`);
+			try {
+				const client = await createAppSyncClient({
+					httpEndpoint: config.appSyncHttpEndpoint,
+					realtimeEndpoint: config.appSyncRealtimeEndpoint,
+					apiKey: config.appSyncApiKey,
+					lambdaNames: lambdaFiles.map((file) =>
+						getLambdaBundleName(name, file.replace(/\.ts$/, "")),
+					),
+					onInvoke: async (request) => {
+						log(`Received invoke: ${request.lambdaName} (${request.requestId})`);
+						const response = await runner.invoke(request);
+						log(`Completed invoke: ${request.lambdaName} (${request.requestId})`);
+						return response;
+					},
+					onConnect: () => {
+						log("WebSocket connected to AppSync");
+						spinner.succeed("Bridge connected");
+					},
+					onError: (error) => ui.warn(`Bridge error: ${error.message}`),
+				});
+				return client;
+			} catch (error) {
+				spinner.fail("Bridge connection failed");
+				ui.error(error instanceof Error ? error.message : String(error));
+				process.exit(1);
+			}
+		}
+
+		async function fullBuildCycle(trigger?: string) {
+			const start = Date.now();
+			lastError = null;
+
+			ui.clear();
+			ui.header(pc.dim("dev"));
+			if (trigger) {
+				ui.info(`Change: ${trigger}`);
+				ui.blank();
+			}
+
+			const buildSpinner = createSpinner("Bundling lambdas...").start();
+			const buildResult = await bundleAll();
+			if (!buildResult.success) {
+				buildSpinner.fail("Bundle failed");
+				lastError = buildResult.error ?? "Bundle failed";
+				showReadyScreen(trigger, true);
+				return;
+			}
+			buildSpinner.succeed(`Bundled ${buildResult.count} lambda${buildResult.count === 1 ? "" : "s"}`);
+
+			const manifestSpinner = createSpinner("Updating manifest...").start();
+			const manifestResult = await generateManifestFiles();
+			if (!manifestResult.success) {
+				manifestSpinner.fail("Manifest failed");
+				lastError = manifestResult.error ?? "Manifest failed";
+				showReadyScreen(trigger, true);
+				return;
+			}
+			manifestSpinner.succeed("Manifest updated");
+
+			// Re-apply terraform to ensure new lambdas exist remotely
+			liveConfig = await ensureInfrastructure(null);
+
+			lastBuildInfo = {
+				lambdas: buildResult.count,
+				routes: manifestResult.routes,
+				duration: Date.now() - start,
+			};
+
+			await appsyncClient.updateLambdas(
+				lambdaFiles.map((file) =>
+					getLambdaBundleName(name, file.replace(/\.ts$/, "")),
+				),
+			);
+			await workerRunner?.reloadAll();
+
+			showReadyScreen(trigger);
+		}
+
+		/**
+		 * Lambda-only build cycle - just rebundle and reload workers
+		 * No terraform apply needed since stub Lambda doesn't change
+		 */
+		async function lambdaOnlyBuildCycle(trigger?: string) {
+			const start = Date.now();
+			lastError = null;
+
+			ui.clear();
+			ui.header(pc.dim("dev"));
+			if (trigger) {
+				ui.info(`Change: ${trigger}`);
+				ui.blank();
+			}
+
+			const buildSpinner = createSpinner("Bundling lambdas...").start();
+			const buildResult = await bundleAll();
+			if (!buildResult.success) {
+				buildSpinner.fail("Bundle failed");
+				lastError = buildResult.error ?? "Bundle failed";
+				showReadyScreen(trigger, true);
+				return;
+			}
+			buildSpinner.succeed(`Bundled ${buildResult.count} lambda${buildResult.count === 1 ? "" : "s"}`);
+
+			const manifestSpinner = createSpinner("Updating manifest...").start();
+			const manifestResult = await generateManifestFiles();
+			if (!manifestResult.success) {
+				manifestSpinner.fail("Manifest failed");
+				lastError = manifestResult.error ?? "Manifest failed";
+				showReadyScreen(trigger, true);
+				return;
+			}
+			manifestSpinner.succeed("Manifest updated");
+
+			lastBuildInfo = {
+				lambdas: buildResult.count,
+				routes: manifestResult.routes,
+				duration: Date.now() - start,
+			};
+
+			// Update subscriptions if lambda list changed
+			await appsyncClient.updateLambdas(
+				lambdaFiles.map((file) =>
+					getLambdaBundleName(name, file.replace(/\.ts$/, "")),
+				),
+			);
+
+			// Reload workers to pick up new code
+			await workerRunner?.reloadAll();
+
+			showReadyScreen(trigger);
+		}
+
+		async function bundleAll(): Promise<{ success: boolean; count: number; error?: string }> {
+			lambdaFiles = listLambdaFiles();
+			const filesToBuild = [...lambdaFiles];
+
+			if (shouldGenerateOpenApi(config)) {
+				await writeOpenApiLambda(lambdaFiles, lambdasDir, config, tempDir);
+				filesToBuild.push("__openapi__.ts");
+			}
+
+			await ensureStubBundled();
+
+			for (const file of filesToBuild) {
+				const result = await bundleSingle(file);
+				if (!result.success) {
+					return {
+						success: false,
+						count: 0,
+						error: `${file}: ${result.error || "Unknown error"}`,
+					};
+				}
+			}
+
+			return { success: true, count: filesToBuild.length };
+		}
+
+		async function bundleSingle(filename: string): Promise<{ success: boolean; error?: string }> {
 			const lambdaName = filename.replace(/\.ts$/, "");
 			const bundleName = getLambdaBundleName(name, lambdaName);
-			// For OpenAPI, the source is in tempDir; for regular lambdas, it's in lambdasDir
-			const inputPath = filename === "__openapi__.ts"
+			const sourcePath = filename === "__openapi__.ts"
 				? join(tempDir, filename)
 				: join(lambdasDir, filename);
 
-			// Create wrapper entry
 			const wrapperPath = join(tempDir, `${lambdaName}-wrapper.ts`);
-			const wrapperContent = createWrapperEntry(inputPath);
+			const wrapperContent = createWrapperEntry(sourcePath);
 			await Bun.write(wrapperPath, wrapperContent);
 
-			// Bundle with prefixed name
 			const buildResult = await bundleLambda(
 				bundleName,
 				wrapperPath,
@@ -144,48 +409,34 @@ export const devCommand = defineCommand({
 				return { success: false, error: buildResult.error };
 			}
 
-			// Package if not disabled
-			if (!args["no-package"]) {
-				const jsPath = join(outputDir, `${bundleName}.js`);
-				const packageResult = await packageLambda(bundleName, jsPath, outputDir);
+			// Package into zip for Terraform
+			const packageResult = await packageLambda(
+				bundleName,
+				buildResult.outputPath,
+				outputDir,
+			);
 
-				if (!packageResult.success) {
-					return { success: false, error: packageResult.error };
-				}
+			if (!packageResult.success) {
+				return { success: false, error: packageResult.error };
 			}
 
 			return { success: true };
 		}
 
-		// Build all lambdas (including OpenAPI if enabled)
-		async function buildAll(): Promise<{ success: boolean; count: number; error?: string }> {
-			// Refresh lambda file list
-			lambdaFiles = readdirSync(lambdasDir).filter(
-				(f) => f.endsWith(".ts") && !f.startsWith("__"),
-			);
-
-			const filesToBuild = [...lambdaFiles];
-
-			// Generate OpenAPI aggregator if enabled
-			if (shouldGenerateOpenApi(config)) {
-				await writeOpenApiLambda(lambdaFiles, lambdasDir, config, tempDir);
-				filesToBuild.push("__openapi__.ts");
+		async function ensureStubBundled() {
+			if (isStubBundled(outputDir)) {
+				return;
 			}
-
-			// Build all lambdas
-			for (const file of filesToBuild) {
-				const result = await buildSingleLambda(file);
-				if (!result.success) {
-					return { success: false, count: 0, error: `${file}: ${result.error || "Unknown error"}` };
-				}
+			const spinner = createSpinner("Bundling stub lambda...").start();
+			const result = await bundleStub(outputDir);
+			if (!result.success) {
+				spinner.fail("Stub bundle failed");
+				ui.error(result.error || "Unknown stub error");
+				process.exit(1);
 			}
-
-			// No need to cleanup OpenAPI - it's in tempDir which persists during dev
-
-			return { success: true, count: filesToBuild.length };
+			spinner.succeed("Stub bundled");
 		}
 
-		// Generate manifest and terraform vars
 		async function generateManifestFiles(): Promise<{ success: boolean; routes: number; error?: string }> {
 			try {
 				const filesToManifest = [...lambdaFiles];
@@ -205,295 +456,101 @@ export const devCommand = defineCommand({
 				await writeTerraformVars(manifest, config);
 
 				return { success: true, routes: manifest.routes.length };
-			} catch (err) {
-				return { success: false, routes: 0, error: err instanceof Error ? err.message : String(err) };
+			} catch (error) {
+				return {
+					success: false,
+					routes: 0,
+					error: error instanceof Error ? error.message : String(error),
+				};
 			}
 		}
 
-		// Deploy to LocalStack
-		async function deployToLocalStack(): Promise<{ success: boolean; error?: string }> {
-			const applyResult = await runTfLocalApply(terraformDir);
-
-			if (!applyResult.success) {
-				return { success: false, error: applyResult.error };
-			}
-
-			// Get and store outputs (transformed to LocalStack URLs)
-			lastOutputs = await getTerraformOutputs(terraformDir, true);
-
-			return { success: true };
-		}
-
-		// Show the final status screen (Vite-like)
-		function showReadyScreen(trigger?: string, failed?: boolean): void {
+		function showReadyScreen(trigger?: string, failed?: boolean) {
 			ui.clear();
 			ui.header(pc.dim("dev"));
 
 			if (failed) {
-				ui.error("Build failed");
+				ui.error("Live mode failed");
 				if (trigger) {
-					ui.info(`Triggered by: ${trigger}`);
+					ui.info(`Trigger: ${trigger}`);
 				}
 				if (lastError) {
-					ui.blank();
-					console.log(pc.dim("  Error:"));
-					// Show first few lines of error
-					const errorLines = lastError.split("\n").slice(0, 10);
-					for (const line of errorLines) {
-						console.log(pc.red(`  ${line}`));
-					}
-					if (lastError.split("\n").length > 10) {
-						console.log(pc.dim("  ... (truncated)"));
-					}
+					console.log(pc.red(lastError));
 				}
 			} else if (lastBuildInfo) {
 				ui.success(
-					`Ready in ${pc.bold(formatDuration(lastBuildInfo.duration))}`,
+					`ready in ${pc.bold(formatDuration(lastBuildInfo.duration))}`,
 				);
-				ui.blank();
-
-				// Show outputs prominently
-				if (lastOutputs && Object.keys(lastOutputs).length > 0) {
-					for (const [key, value] of Object.entries(lastOutputs)) {
-						const valueStr = typeof value === "string" ? value : JSON.stringify(value);
-						console.log(`  ${pc.dim("➜")}  ${pc.bold(key)}: ${pc.cyan(valueStr)}`);
-					}
-				}
-
-				ui.blank();
 				console.log(
-					pc.dim(`  ${lastBuildInfo.lambdas} lambda${lastBuildInfo.lambdas === 1 ? "" : "s"} · ${lastBuildInfo.routes} routes`),
+					pc.dim(
+						`  ${lastBuildInfo.lambdas} lambda${lastBuildInfo.lambdas === 1 ? "" : "s"} · ${lastBuildInfo.routes} routes`,
+					),
 				);
 			}
 
-			// Watch status
 			ui.blank();
-			console.log(pc.dim("  ─────────────────────────────────────"));
-			ui.blank();
-
-			const watchDirs = [config.lambdasDir];
-			if (localstackEnabled) {
-				watchDirs.push(config.terraform.outputDir);
+			if (liveConfig) {
+				console.log(
+					`  ${pc.dim("➜")}  ${pc.bold("api")}      ${pc.cyan(liveConfig.apiEndpoint)}`,
+				);
+				console.log(
+					`  ${pc.dim("➜")}  ${pc.bold("appsync")}  ${pc.cyan(liveConfig.appSyncHttpEndpoint)}`,
+				);
 			}
-
-			console.log(`  ${pc.dim("watching:")} ${watchDirs.join(", ")}`);
-
-			if (localstackEnabled) {
-				console.log(`  ${pc.dim("deploy:")}   ${pc.green("localstack")}`);
-			}
-
-			ui.blank();
-			console.log(pc.dim("  press ctrl+c to stop"));
-			ui.blank();
 		}
 
-		// Run the full build and deploy cycle
-		async function runBuildCycle(trigger?: string): Promise<void> {
-			const cycleStart = Date.now();
-			lastError = null;
-
-			// Show building status
-			ui.clear();
-			ui.header(pc.dim("dev"));
-
-			if (trigger) {
-				ui.info(`Change: ${trigger}`);
-				ui.blank();
-			}
-
-			// Build
-			const buildSpinner = createSpinner("Building...").start();
-			const buildResult = await buildAll();
-
-			if (!buildResult.success) {
-				buildSpinner.fail("Build failed");
-				lastError = buildResult.error || "Unknown build error";
-				showReadyScreen(trigger, true);
-				return;
-			}
-
-			buildSpinner.succeed(`Built ${buildResult.count} lambda${buildResult.count === 1 ? "" : "s"}`);
-
-			// Generate manifest
-			const manifestSpinner = createSpinner("Generating manifest...").start();
-			const manifestResult = await generateManifestFiles();
-
-			if (!manifestResult.success) {
-				manifestSpinner.fail("Manifest failed");
-				lastError = manifestResult.error || "Unknown manifest error";
-				showReadyScreen(trigger, true);
-				return;
-			}
-
-			manifestSpinner.succeed("Generated manifest");
-
-			// Deploy if LocalStack enabled
-			if (localstackEnabled) {
-				const deploySpinner = createSpinner("Deploying...").start();
-				const deployResult = await deployToLocalStack();
-
-				if (!deployResult.success) {
-					deploySpinner.fail("Deploy failed");
-					lastError = deployResult.error || "Unknown deploy error";
-					showReadyScreen(trigger, true);
+		function watchFiles() {
+			lambdaWatcher = watch(lambdasDir, { recursive: false }, (event, filename) => {
+				if (!filename || !filename.endsWith(".ts")) {
 					return;
 				}
+				scheduleBuild(filename, "lambda");
+			});
 
-				deploySpinner.succeed("Deployed");
+			if (existsSync(terraformDir)) {
+				terraformWatcher = watch(
+					terraformDir,
+					{ recursive: false },
+					(event, filename) => {
+						if (!filename || !filename.endsWith(".tf")) {
+							return;
+						}
+						scheduleBuild(filename, "terraform");
+					},
+				);
 			}
-
-			// Store build info
-			const duration = Date.now() - cycleStart;
-			lastBuildInfo = {
-				lambdas: buildResult.count,
-				routes: manifestResult.routes,
-				duration,
-			};
-
-			// Show ready screen
-			showReadyScreen(trigger);
 		}
 
-		// Run terraform-only deploy
-		async function runTerraformCycle(trigger: string): Promise<void> {
-			const cycleStart = Date.now();
-			lastError = null;
-
-			ui.clear();
-			ui.header(pc.dim("dev"));
-			ui.info(`Terraform: ${trigger}`);
-			ui.blank();
-
-			const deploySpinner = createSpinner("Deploying...").start();
-			const deployResult = await deployToLocalStack();
-
-			if (!deployResult.success) {
-				deploySpinner.fail("Deploy failed");
-				lastError = deployResult.error || "Unknown deploy error";
-				showReadyScreen(trigger, true);
-				return;
-			}
-
-			deploySpinner.succeed("Deployed");
-
-			// Update duration
-			if (lastBuildInfo) {
-				lastBuildInfo.duration = Date.now() - cycleStart;
-			}
-
-			showReadyScreen(trigger);
-		}
-
-		// Debounce timer for file changes
-		let debounceTimer: ReturnType<typeof setTimeout> | null = null;
-		const DEBOUNCE_MS = 150;
-
-		// Pending changes during debounce
-		let pendingTrigger: string | null = null;
-		let pendingIsTerraform: boolean = false;
-
-		// Handle file change with debouncing
-		function handleFileChange(trigger: string, isTerraform: boolean = false): void {
+		function scheduleBuild(trigger: string, buildType: "lambda" | "terraform") {
 			pendingTrigger = trigger;
-			pendingIsTerraform = isTerraform;
-
+			// Terraform changes take precedence (require full rebuild)
+			if (buildType === "terraform" || pendingBuildType !== "terraform") {
+				pendingBuildType = buildType;
+			}
 			if (debounceTimer) {
 				clearTimeout(debounceTimer);
 			}
-
-			debounceTimer = setTimeout(async () => {
+			debounceTimer = setTimeout(() => {
 				debounceTimer = null;
-				const triggerName = pendingTrigger || trigger;
-				const terraformOnly = pendingIsTerraform;
+				const triggerName = pendingTrigger ? basename(pendingTrigger) : undefined;
+				const type = pendingBuildType;
 				pendingTrigger = null;
-				pendingIsTerraform = false;
+				pendingBuildType = "lambda";
 
-				if (terraformOnly && localstackEnabled) {
-					await runTerraformCycle(triggerName);
+				if (type === "terraform") {
+					fullBuildCycle(triggerName);
 				} else {
-					await runBuildCycle(triggerName);
+					lambdaOnlyBuildCycle(triggerName);
 				}
 			}, DEBOUNCE_MS);
 		}
 
-		// Initial build
-		await runBuildCycle();
-
-		// Set up lambda file watcher
-		const lambdaWatcher = watch(
-			lambdasDir,
-			{ recursive: false },
-			(event, filename) => {
-				if (
-					!filename ||
-					!filename.endsWith(".ts") ||
-					filename.startsWith("__")
-				) {
-					return;
-				}
-
-				handleFileChange(filename, false);
-			},
-		);
-
-		// Set up terraform watcher if LocalStack is enabled
-		let terraformWatcher: ReturnType<typeof watch> | null = null;
-
-		if (localstackEnabled && existsSync(terraformDir)) {
-			terraformWatcher = watch(
-				terraformDir,
-				{ recursive: false },
-				(event, filename) => {
-					if (!filename) return;
-
-					// Skip auto-generated files and tflocal override files
-					if (
-						filename === config.terraform.tfvarsFilename ||
-						filename.endsWith(".auto.tfvars") ||
-						filename.startsWith(".terraform") ||
-						filename.endsWith(".tfstate") ||
-						filename.endsWith(".tfstate.backup") ||
-						filename.includes("override") ||
-						filename.startsWith("localstack")
-					) {
-						return;
-					}
-
-					// Only watch .tf files
-					if (!filename.endsWith(".tf")) {
-						return;
-					}
-
-					handleFileChange(filename, true);
-				},
-			);
-		}
-
-		// Handle graceful shutdown
-		process.on("SIGINT", () => {
-			ui.blank();
-			ui.info("Stopping...");
-			lambdaWatcher.close();
-			if (terraformWatcher) {
-				terraformWatcher.close();
-			}
-
-			// Clear debounce timer
-			if (debounceTimer) {
-				clearTimeout(debounceTimer);
-			}
-
-			// Clean up temp directory
+		function cleanupTemp() {
 			try {
 				rmSync(tempDir, { recursive: true, force: true });
 			} catch {
-				// Ignore cleanup errors
+				// ignore
 			}
-
-			process.exit(0);
-		});
-
-		// Keep process alive
-		await new Promise(() => {});
+		}
 	},
 });
