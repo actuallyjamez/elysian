@@ -109,21 +109,21 @@ export const buildCommand = defineCommand({
 			[];
 
 		for (const file of lambdaFiles) {
-			const name = file.replace(/\.ts$/, "");
-			const bundleName = getLambdaBundleName(name, name);
+			const lambdaName = file.replace(/\.ts$/, "");
+			const bundleName = getLambdaBundleName(name, lambdaName);
 			const inputPath = join(lambdasDir, file);
 
 			// Create wrapper entry that imports the original and exports handler
-			const wrapperPath = join(tempDir, `${name}-wrapper.ts`);
+			const wrapperPath = join(tempDir, `${lambdaName}-wrapper.ts`);
 			const wrapperContent = createWrapperEntry(inputPath);
 			await Bun.write(wrapperPath, wrapperContent);
 
 			// Bundle the wrapper with prefixed name
 			const result = await bundleLambda(bundleName, wrapperPath, outputDir, config);
-			buildResults.push({ ...result, name, bundleName });
+			buildResults.push({ ...result, name: lambdaName, bundleName });
 
 			if (!result.success) {
-				console.log(`  ${pc.red("✗")} Failed to build ${name}: ${result.error}`);
+				console.log(`  ${pc.red("✗")} Failed to build ${lambdaName}: ${result.error}`);
 				process.exit(1);
 			}
 		}
@@ -143,14 +143,14 @@ export const buildCommand = defineCommand({
 		const packageSizes: Map<string, number> = new Map();
 
 		for (const file of lambdaFiles) {
-			const name = file.replace(/\.ts$/, "");
-			const bundleName = getLambdaBundleName(name, name);
+			const lambdaName = file.replace(/\.ts$/, "");
+			const bundleName = getLambdaBundleName(name, lambdaName);
 			const jsPath = join(outputDir, `${bundleName}.js`);
 
 			const result = await packageLambda(bundleName, jsPath, outputDir);
 
 			if (!result.success) {
-				console.log(`  ${pc.red("✗")} Failed to package ${name}: ${result.error}`);
+				console.log(`  ${pc.red("✗")} Failed to package ${lambdaName}: ${result.error}`);
 				process.exit(1);
 			}
 
@@ -158,7 +158,7 @@ export const buildCommand = defineCommand({
 			const zipPath = join(outputDir, `${bundleName}.zip`);
 			const stat = await Bun.file(zipPath).stat();
 			if (stat) {
-				packageSizes.set(name, stat.size);
+				packageSizes.set(lambdaName, stat.size);
 			}
 		}
 
