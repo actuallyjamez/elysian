@@ -110,3 +110,74 @@ export function tsconfigTemplate(): string {
 		2,
 	);
 }
+
+/**
+ * Ensure package.json has required fields (name, version, scripts)
+ * Returns the updated content if changes were made, or null if no changes needed
+ */
+export function ensurePackageJsonFields(
+	existingContent: string,
+	name: string,
+): string | null {
+	let pkg: Record<string, unknown>;
+	try {
+		pkg = JSON.parse(existingContent);
+	} catch {
+		// Invalid JSON, can't update
+		return null;
+	}
+
+	let changed = false;
+
+	// Ensure name
+	if (!pkg.name) {
+		pkg.name = name;
+		changed = true;
+	}
+
+	// Ensure version
+	if (!pkg.version) {
+		pkg.version = "0.1.0";
+		changed = true;
+	}
+
+	// Ensure type is module
+	if (!pkg.type) {
+		pkg.type = "module";
+		changed = true;
+	}
+
+	// Ensure scripts exist with elysian commands
+	const scripts = (pkg.scripts as Record<string, string>) || {};
+	if (!scripts.build) {
+		scripts.build = "elysian build";
+		changed = true;
+	}
+	if (!scripts.dev) {
+		scripts.dev = "elysian dev";
+		changed = true;
+	}
+	if (changed || !pkg.scripts) {
+		pkg.scripts = scripts;
+	}
+
+	if (!changed) {
+		return null;
+	}
+
+	// Reorder keys to put name, version, type, scripts first
+	const ordered: Record<string, unknown> = {};
+	if (pkg.name) ordered.name = pkg.name;
+	if (pkg.version) ordered.version = pkg.version;
+	if (pkg.type) ordered.type = pkg.type;
+	if (pkg.scripts) ordered.scripts = pkg.scripts;
+
+	// Add remaining keys
+	for (const [key, value] of Object.entries(pkg)) {
+		if (!ordered[key]) {
+			ordered[key] = value;
+		}
+	}
+
+	return JSON.stringify(ordered, null, 2);
+}

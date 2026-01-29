@@ -13,6 +13,7 @@ import {
 	packageJsonTemplate,
 	gitignoreTemplate,
 	tsconfigTemplate,
+	ensurePackageJsonFields,
 } from "./templates";
 import {
 	templates as tfTemplates,
@@ -105,6 +106,24 @@ export async function scaffoldProject(
 		const tsconfigPath = join(cwd, "tsconfig.json");
 		if (!existsSync(tsconfigPath)) {
 			await writeFile(tsconfigPath, tsconfigTemplate(), result, false);
+		}
+	} else {
+		// For existing projects, ensure package.json has required fields
+		const packageJsonPath = join(cwd, "package.json");
+		if (existsSync(packageJsonPath)) {
+			const existing = await readFileOrEmpty(packageJsonPath);
+			const updated = ensurePackageJsonFields(existing, answers.name);
+			if (updated) {
+				await writeFile(packageJsonPath, updated, result, true);
+			}
+		} else {
+			// No package.json exists, create one
+			await writeFile(
+				packageJsonPath,
+				packageJsonTemplate(answers.name),
+				result,
+				false,
+			);
 		}
 	}
 
