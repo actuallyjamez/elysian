@@ -1,5 +1,16 @@
 # @actuallyjamez/elysian
 
+## 0.7.1
+
+### Patch Changes
+
+- [`22717d9`](https://github.com/actuallyjamez/elysian/commit/22717d9f7e7361033dd81fb147846e41bfcda04b) Thanks [@github-actions[bot]](https://github.com/github-actions%5Bbot%5D)! - Fix build errors and improve error messages
+
+  - Move **openapi**.ts generation to temp directory instead of user's src/lambdas
+  - Add detailed build error output with line numbers and code context
+  - Resolve hono and @elysiajs/openapi from elysian's node_modules (users don't need to install them)
+  - Change starter template to use @types/node instead of bun-types
+
 ## 0.7.0
 
 ### Minor Changes
