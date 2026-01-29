@@ -3,9 +3,8 @@
  */
 
 import { defineCommand } from "citty";
-import { readdirSync, mkdirSync, existsSync } from "fs";
+import { readdirSync, mkdirSync, existsSync, rmSync } from "fs";
 import { join } from "path";
-import pc from "picocolors";
 import { loadConfig } from "../../core/config";
 import { bundleLambda } from "../../core/bundler";
 import { packageLambda } from "../../core/packager";
@@ -18,18 +17,7 @@ import {
 } from "../../core/openapi";
 import { createWrapperEntry } from "../../core/handler-wrapper";
 import { getLambdaBundleName } from "../../core/naming";
-import { version } from "../../core/version";
-
-function formatDuration(ms: number): string {
-	if (ms < 1000) return `${ms}ms`;
-	return `${(ms / 1000).toFixed(2)}s`;
-}
-
-function formatSize(bytes: number): string {
-	if (bytes < 1024) return `${bytes} B`;
-	if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-	return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
-}
+import { ui, pc, formatDuration, formatSize } from "../ui";
 
 export const buildCommand = defineCommand({
 	meta: {
@@ -52,20 +40,14 @@ export const buildCommand = defineCommand({
 		}
 
 		// Header
-		console.log();
-		console.log(
-			`  ${pc.bold(pc.cyan("elysian"))} ${pc.dim(`v${version}`)} ${args.prod ? pc.yellow("production") : pc.dim("development")}`,
-		);
-		console.log();
+		ui.header(args.prod ? pc.yellow("production") : "development");
 
 		// Load config
 		let config;
 		try {
 			config = await loadConfig();
 		} catch (error) {
-			console.log(
-				`  ${pc.red("✗")} ${error instanceof Error ? error.message : error}`,
-			);
+			ui.error(error instanceof Error ? error.message : String(error));
 			process.exit(1);
 		}
 
@@ -76,7 +58,7 @@ export const buildCommand = defineCommand({
 
 		// Ensure directories exist
 		if (!existsSync(lambdasDir)) {
-			console.log(`  ${pc.red("✗")} Lambdas directory not found: ${lambdasDir}`);
+			ui.error(`Lambdas directory not found: ${lambdasDir}`);
 			process.exit(1);
 		}
 
@@ -89,7 +71,7 @@ export const buildCommand = defineCommand({
 		);
 
 		if (lambdaFiles.length === 0) {
-			console.log(`  ${pc.yellow("!")} No lambda files found in ${config.lambdasDir}`);
+			ui.warn(`No lambda files found in ${config.lambdasDir}`);
 			return;
 		}
 
@@ -100,13 +82,17 @@ export const buildCommand = defineCommand({
 		}
 
 		// Build phase
-		console.log(`  ${pc.green("✓")} Compiling ${lambdaFiles.length} lambdas...`);
+		ui.success(`Compiling ${lambdaFiles.length} lambdas...`);
 
 		const tempDir = join(outputDir, "__temp__");
 		mkdirSync(tempDir, { recursive: true });
 
-		const buildResults: Array<{ name: string; bundleName: string; success: boolean; error?: string }> =
-			[];
+		const buildResults: Array<{
+			name: string;
+			bundleName: string;
+			success: boolean;
+			error?: string;
+		}> = [];
 
 		for (const file of lambdaFiles) {
 			const lambdaName = file.replace(/\.ts$/, "");
@@ -123,13 +109,12 @@ export const buildCommand = defineCommand({
 			buildResults.push({ ...result, name: lambdaName, bundleName });
 
 			if (!result.success) {
-				console.log(`  ${pc.red("✗")} Failed to build ${lambdaName}: ${result.error}`);
+				ui.error(`Failed to build ${lambdaName}: ${result.error}`);
 				process.exit(1);
 			}
 		}
 
 		// Clean up temp directory
-		const { rmSync } = await import("fs");
 		rmSync(tempDir, { recursive: true, force: true });
 
 		// Clean up generated OpenAPI file
@@ -138,7 +123,7 @@ export const buildCommand = defineCommand({
 		}
 
 		// Package phase
-		console.log(`  ${pc.green("✓")} Packaging lambdas...`);
+		ui.success("Packaging lambdas...");
 
 		const packageSizes: Map<string, number> = new Map();
 
@@ -150,7 +135,7 @@ export const buildCommand = defineCommand({
 			const result = await packageLambda(bundleName, jsPath, outputDir);
 
 			if (!result.success) {
-				console.log(`  ${pc.red("✗")} Failed to package ${lambdaName}: ${result.error}`);
+				ui.error(`Failed to package ${lambdaName}: ${result.error}`);
 				process.exit(1);
 			}
 
@@ -163,7 +148,7 @@ export const buildCommand = defineCommand({
 		}
 
 		// Generate manifest
-		console.log(`  ${pc.green("✓")} Generating manifest...`);
+		ui.success("Generating manifest...");
 
 		try {
 			const manifest = await generateManifest(
@@ -183,10 +168,8 @@ export const buildCommand = defineCommand({
 			// Duration
 			const duration = Date.now() - startTime;
 
-			// Route table header
-			console.log();
-			console.log(`  ${pc.bold("Routes")}`);
-			console.log();
+			// Route table
+			ui.section("Routes");
 
 			// Group routes by lambda (use original name for display)
 			const routesByLambda = new Map<string, typeof manifest.routes>();
@@ -200,55 +183,29 @@ export const buildCommand = defineCommand({
 				routesByLambda.set(displayName, existing);
 			}
 
-			// Method colors
-			const methodColor = (method: string) => {
-				switch (method) {
-					case "GET":
-						return pc.green;
-					case "POST":
-						return pc.blue;
-					case "PUT":
-						return pc.yellow;
-					case "DELETE":
-						return pc.red;
-					case "PATCH":
-						return pc.magenta;
-					default:
-						return pc.white;
-				}
-			};
-
 			// Find longest path for alignment
 			const maxPathLen = Math.max(...manifest.routes.map((r) => r.path.length));
 
 			for (const [displayName, routes] of routesByLambda) {
 				const size = packageSizes.get(displayName);
-				const sizeStr = size ? pc.dim(` (${formatSize(size)})`) : "";
-				console.log(`  ${pc.dim("λ")} ${pc.bold(displayName)}${sizeStr}`);
+				const sizeStr = size ? formatSize(size) : undefined;
+				ui.labeled(displayName, sizeStr);
 
 				for (const route of routes) {
-					const method = methodColor(route.method)(route.method.padEnd(6));
-					const path = route.path.padEnd(maxPathLen + 2);
-					const params =
-						route.pathParameters.length > 0
-							? pc.dim(` [${route.pathParameters.join(", ")}]`)
-							: "";
-					console.log(`    ${method} ${path}${params}`);
+					ui.route(route.method, route.path, route.pathParameters, maxPathLen);
 				}
-				console.log();
+				ui.blank();
 			}
 
 			// Summary footer
-			console.log(pc.dim("  " + "─".repeat(40)));
-			console.log();
-			console.log(
-				`  ${pc.green("✓")} Compiled ${pc.bold(String(manifest.lambdas.length))} lambdas (${manifest.routes.length} routes) in ${pc.bold(formatDuration(duration))}`,
+			ui.divider();
+
+			ui.success(
+				`Compiled ${pc.bold(String(manifest.lambdas.length))} lambdas (${manifest.routes.length} routes) in ${pc.bold(formatDuration(duration))}`,
 			);
-			console.log();
+			ui.blank();
 		} catch (error) {
-			console.log(
-				`  ${pc.red("✗")} ${error instanceof Error ? error.message : String(error)}`,
-			);
+			ui.error(error instanceof Error ? error.message : String(error));
 			process.exit(1);
 		}
 	},

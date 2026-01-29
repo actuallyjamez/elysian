@@ -5,7 +5,6 @@
 import { existsSync, mkdirSync } from "fs";
 import { join } from "path";
 import { spawn } from "bun";
-import consola from "consola";
 import type { PackageManager, ProjectInfo } from "./detect";
 import type { WizardAnswers } from "./prompts";
 import {
@@ -22,6 +21,7 @@ import {
 	appendMain,
 	appendOutputs,
 } from "./terraform";
+import { ui } from "../../ui";
 
 export interface ScaffoldResult {
 	created: string[];
@@ -209,7 +209,7 @@ export async function installDependencies(
 	const addCmd = packageManager === "npm" ? "install" : "add";
 	const devFlag = packageManager === "npm" ? "--save-dev" : "-D";
 
-	consola.start("Installing dependencies...");
+	ui.info("Installing dependencies...");
 
 	// Install main dependencies
 	const addProc = spawn([packageManager, addCmd, ...deps], {
@@ -237,7 +237,7 @@ export async function installDependencies(
 		throw new Error(`Failed to install dev dependencies: ${stderr}`);
 	}
 
-	consola.success("Dependencies installed");
+	ui.success("Dependencies installed");
 }
 
 /**
@@ -251,14 +251,14 @@ export function getRelativePath(cwd: string, fullPath: string): string {
  * Print scaffold results
  */
 export function printResults(cwd: string, result: ScaffoldResult): void {
-	console.log("");
+	ui.blank();
 
 	for (const path of result.created) {
-		consola.success(`Created ${getRelativePath(cwd, path)}`);
+		ui.success(`Created ${getRelativePath(cwd, path)}`);
 	}
 
 	for (const path of result.updated) {
-		consola.success(`Updated ${getRelativePath(cwd, path)}`);
+		ui.success(`Updated ${getRelativePath(cwd, path)}`);
 	}
 
 	// Don't print skipped files - too noisy

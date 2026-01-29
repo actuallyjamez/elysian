@@ -1,21 +1,35 @@
 /**
- * Dev command - Watch mode for development
+ * Dev command - Watch mode with LocalStack integration
  */
 
 import { defineCommand } from "citty";
-import consola from "consola";
-import { watch, readdirSync, mkdirSync, existsSync } from "fs";
+import { watch, readdirSync, mkdirSync, existsSync, rmSync } from "fs";
 import { join } from "path";
 import { loadConfig, type ResolvedConfig } from "../../core/config";
 import { bundleLambda } from "../../core/bundler";
 import { packageLambda } from "../../core/packager";
 import { createWrapperEntry } from "../../core/handler-wrapper";
 import { getLambdaBundleName } from "../../core/naming";
+import { generateManifest, writeManifest } from "../../core/manifest";
+import { writeTerraformVars } from "../../core/terraform";
+import {
+	shouldGenerateOpenApi,
+	writeOpenApiLambda,
+	cleanupOpenApiLambda,
+} from "../../core/openapi";
+import {
+	detectLocalStack,
+	isTerraformInitialized,
+	runTfLocalInit,
+	runTfLocalApply,
+	getTerraformOutputs,
+} from "../../core/localstack";
+import { ui, pc, createSpinner, formatDuration } from "../ui";
 
 export const devCommand = defineCommand({
 	meta: {
 		name: "dev",
-		description: "Watch mode - rebuild lambdas on file changes",
+		description: "Watch mode - rebuild lambdas on file changes with LocalStack deploy",
 	},
 	args: {
 		"no-package": {
@@ -23,61 +37,109 @@ export const devCommand = defineCommand({
 			description: "Skip creating zip files (faster rebuilds)",
 			default: false,
 		},
+		"no-localstack": {
+			type: "boolean",
+			description: "Disable LocalStack integration",
+			default: false,
+		},
 	},
 	async run({ args }) {
-		consola.start("Loading configuration...");
+		// Initial setup
+		ui.header(pc.dim("dev"));
 
+		// Load config
 		let config: ResolvedConfig;
 		try {
 			config = await loadConfig();
+			ui.success("Loaded configuration");
 		} catch (error) {
-			consola.error(error instanceof Error ? error.message : error);
+			ui.error(error instanceof Error ? error.message : String(error));
 			process.exit(1);
 		}
 
 		const name = config.name;
 		const lambdasDir = join(process.cwd(), config.lambdasDir);
 		const outputDir = join(process.cwd(), config.outputDir);
+		const terraformDir = join(process.cwd(), config.terraform.outputDir);
 		const tempDir = join(outputDir, "__temp__");
 
 		// Ensure directories exist
 		if (!existsSync(lambdasDir)) {
-			consola.error(`Lambdas directory not found: ${lambdasDir}`);
+			ui.error(`Lambdas directory not found: ${lambdasDir}`);
 			process.exit(1);
 		}
 
 		mkdirSync(outputDir, { recursive: true });
 		mkdirSync(tempDir, { recursive: true });
 
+		// Detect LocalStack
+		let localstackEnabled = false;
+
+		if (!args["no-localstack"]) {
+			const detection = await detectLocalStack();
+
+			if (detection.available) {
+				localstackEnabled = true;
+				ui.success("LocalStack detected");
+
+				// Check if terraform is initialized
+				if (!isTerraformInitialized(terraformDir)) {
+					const spinner = createSpinner("Initializing terraform...").start();
+					const initResult = await runTfLocalInit(terraformDir);
+					if (!initResult.success) {
+						spinner.fail("tflocal init failed");
+						console.log(pc.dim(initResult.error));
+						ui.warn("Continuing without LocalStack deploy");
+						localstackEnabled = false;
+					} else {
+						spinner.succeed("Terraform initialized");
+					}
+				}
+			} else {
+				if (!detection.localstackRunning) {
+					ui.warn("LocalStack not running - skipping deploy");
+				}
+				if (!detection.tfLocalInstalled) {
+					ui.warn("tflocal not installed - skipping deploy");
+				}
+			}
+		}
+
 		// Get initial lambda files
-		const lambdaFiles = readdirSync(lambdasDir).filter(
+		let lambdaFiles = readdirSync(lambdasDir).filter(
 			(f) => f.endsWith(".ts") && !f.startsWith("__"),
 		);
 
 		if (lambdaFiles.length === 0) {
-			consola.warn("No lambda files found in", config.lambdasDir);
+			ui.warn(`No lambda files found in ${config.lambdasDir}`);
 		}
+
+		// Track last terraform outputs and build info for display
+		let lastOutputs: Record<string, unknown> | null = null;
+		let lastBuildInfo: { lambdas: number; routes: number; duration: number } | null = null;
 
 		// Build function for a single lambda
 		async function buildSingleLambda(filename: string): Promise<boolean> {
-			const name = filename.replace(/\.ts$/, "");
-			const bundleName = getLambdaBundleName(name, name);
+			const lambdaName = filename.replace(/\.ts$/, "");
+			const bundleName = getLambdaBundleName(name, lambdaName);
 			const inputPath = join(lambdasDir, filename);
 
 			// Create wrapper entry
-			const wrapperPath = join(tempDir, `${name}-wrapper.ts`);
+			const wrapperPath = join(tempDir, `${lambdaName}-wrapper.ts`);
 			const wrapperContent = createWrapperEntry(inputPath);
 			await Bun.write(wrapperPath, wrapperContent);
 
 			// Bundle with prefixed name
-			const buildResult = await bundleLambda(bundleName, wrapperPath, outputDir, config);
+			const buildResult = await bundleLambda(
+				bundleName,
+				wrapperPath,
+				outputDir,
+				config,
+			);
 
 			if (!buildResult.success) {
-				consola.error(`Failed to build ${name}: ${buildResult.error}`);
 				return false;
 			}
-
-			consola.success(`Built ${bundleName}.js`);
 
 			// Package if not disabled
 			if (!args["no-package"]) {
@@ -85,56 +147,323 @@ export const devCommand = defineCommand({
 				const packageResult = await packageLambda(bundleName, jsPath, outputDir);
 
 				if (!packageResult.success) {
-					consola.error(`Failed to package ${name}: ${packageResult.error}`);
 					return false;
 				}
-
-				consola.success(`Packaged ${bundleName}.zip`);
 			}
 
 			return true;
 		}
 
-		// Initial build of all lambdas
-		consola.start("Initial build...");
+		// Build all lambdas (including OpenAPI if enabled)
+		async function buildAll(): Promise<{ success: boolean; count: number }> {
+			// Refresh lambda file list
+			lambdaFiles = readdirSync(lambdasDir).filter(
+				(f) => f.endsWith(".ts") && !f.startsWith("__"),
+			);
 
-		for (const file of lambdaFiles) {
-			await buildSingleLambda(file);
+			const filesToBuild = [...lambdaFiles];
+
+			// Generate OpenAPI aggregator if enabled
+			if (shouldGenerateOpenApi(config)) {
+				await writeOpenApiLambda(lambdaFiles, lambdasDir, config);
+				filesToBuild.push("__openapi__.ts");
+			}
+
+			// Build all lambdas
+			for (const file of filesToBuild) {
+				const success = await buildSingleLambda(file);
+				if (!success) {
+					return { success: false, count: 0 };
+				}
+			}
+
+			// Cleanup OpenAPI source file
+			if (shouldGenerateOpenApi(config)) {
+				await cleanupOpenApiLambda(lambdasDir);
+			}
+
+			return { success: true, count: filesToBuild.length };
 		}
 
-		consola.info("Initial build complete");
-		console.log("");
-		consola.box(
-			"Watch mode active\n\n" +
-				`Watching: ${config.lambdasDir}/\n` +
-				`Output:   ${config.outputDir}/\n\n` +
-				"Press Ctrl+C to stop",
-		);
+		// Generate manifest and terraform vars
+		async function generateManifestFiles(): Promise<{ success: boolean; routes: number }> {
+			try {
+				const filesToManifest = [...lambdaFiles];
+				if (shouldGenerateOpenApi(config)) {
+					filesToManifest.push("__openapi__.ts");
+				}
 
-		// Set up file watcher
-		const watcher = watch(lambdasDir, { recursive: false }, async (event, filename) => {
-			if (!filename || !filename.endsWith(".ts") || filename.startsWith("__")) {
+				const manifest = await generateManifest(
+					filesToManifest,
+					outputDir,
+					config.openapi.enabled,
+					name,
+				);
+
+				const manifestPath = join(outputDir, "manifest.json");
+				await writeManifest(manifest, manifestPath);
+				await writeTerraformVars(manifest, config);
+
+				return { success: true, routes: manifest.routes.length };
+			} catch {
+				return { success: false, routes: 0 };
+			}
+		}
+
+		// Deploy to LocalStack
+		async function deployToLocalStack(): Promise<boolean> {
+			const applyResult = await runTfLocalApply(terraformDir);
+
+			if (!applyResult.success) {
+				return false;
+			}
+
+			// Get and store outputs (transformed to LocalStack URLs)
+			lastOutputs = await getTerraformOutputs(terraformDir, true);
+
+			return true;
+		}
+
+		// Show the final status screen (Vite-like)
+		function showReadyScreen(trigger?: string, failed?: boolean): void {
+			ui.clear();
+			ui.header(pc.dim("dev"));
+
+			if (failed) {
+				ui.error("Build failed");
+				if (trigger) {
+					ui.info(`Triggered by: ${trigger}`);
+				}
+			} else if (lastBuildInfo) {
+				ui.success(
+					`Ready in ${pc.bold(formatDuration(lastBuildInfo.duration))}`,
+				);
+				ui.blank();
+
+				// Show outputs prominently
+				if (lastOutputs && Object.keys(lastOutputs).length > 0) {
+					for (const [key, value] of Object.entries(lastOutputs)) {
+						const valueStr = typeof value === "string" ? value : JSON.stringify(value);
+						console.log(`  ${pc.dim("➜")}  ${pc.bold(key)}: ${pc.cyan(valueStr)}`);
+					}
+				}
+
+				ui.blank();
+				console.log(
+					pc.dim(`  ${lastBuildInfo.lambdas} lambda${lastBuildInfo.lambdas === 1 ? "" : "s"} · ${lastBuildInfo.routes} routes`),
+				);
+			}
+
+			// Watch status
+			ui.blank();
+			console.log(pc.dim("  ─────────────────────────────────────"));
+			ui.blank();
+
+			const watchDirs = [config.lambdasDir];
+			if (localstackEnabled) {
+				watchDirs.push(config.terraform.outputDir);
+			}
+
+			console.log(`  ${pc.dim("watching:")} ${watchDirs.join(", ")}`);
+
+			if (localstackEnabled) {
+				console.log(`  ${pc.dim("deploy:")}   ${pc.green("localstack")}`);
+			}
+
+			ui.blank();
+			console.log(pc.dim("  press ctrl+c to stop"));
+			ui.blank();
+		}
+
+		// Run the full build and deploy cycle
+		async function runBuildCycle(trigger?: string): Promise<void> {
+			const cycleStart = Date.now();
+
+			// Show building status
+			ui.clear();
+			ui.header(pc.dim("dev"));
+
+			if (trigger) {
+				ui.info(`Change: ${trigger}`);
+				ui.blank();
+			}
+
+			// Build
+			const buildSpinner = createSpinner("Building...").start();
+			const buildResult = await buildAll();
+
+			if (!buildResult.success) {
+				buildSpinner.fail("Build failed");
+				showReadyScreen(trigger, true);
 				return;
 			}
 
-			console.log("");
-			consola.info(`Change detected: ${filename}`);
+			buildSpinner.succeed(`Built ${buildResult.count} lambda${buildResult.count === 1 ? "" : "s"}`);
 
-			const success = await buildSingleLambda(filename);
+			// Generate manifest
+			const manifestSpinner = createSpinner("Generating manifest...").start();
+			const manifestResult = await generateManifestFiles();
 
-			if (success) {
-				consola.ready("Rebuild complete");
+			if (!manifestResult.success) {
+				manifestSpinner.fail("Manifest failed");
+				showReadyScreen(trigger, true);
+				return;
 			}
-		});
+
+			manifestSpinner.succeed("Generated manifest");
+
+			// Deploy if LocalStack enabled
+			if (localstackEnabled) {
+				const deploySpinner = createSpinner("Deploying...").start();
+				const deploySuccess = await deployToLocalStack();
+
+				if (!deploySuccess) {
+					deploySpinner.fail("Deploy failed");
+					showReadyScreen(trigger, true);
+					return;
+				}
+
+				deploySpinner.succeed("Deployed");
+			}
+
+			// Store build info
+			const duration = Date.now() - cycleStart;
+			lastBuildInfo = {
+				lambdas: buildResult.count,
+				routes: manifestResult.routes,
+				duration,
+			};
+
+			// Show ready screen
+			showReadyScreen(trigger);
+		}
+
+		// Run terraform-only deploy
+		async function runTerraformCycle(trigger: string): Promise<void> {
+			const cycleStart = Date.now();
+
+			ui.clear();
+			ui.header(pc.dim("dev"));
+			ui.info(`Terraform: ${trigger}`);
+			ui.blank();
+
+			const deploySpinner = createSpinner("Deploying...").start();
+			const deploySuccess = await deployToLocalStack();
+
+			if (!deploySuccess) {
+				deploySpinner.fail("Deploy failed");
+				showReadyScreen(trigger, true);
+				return;
+			}
+
+			deploySpinner.succeed("Deployed");
+
+			// Update duration
+			if (lastBuildInfo) {
+				lastBuildInfo.duration = Date.now() - cycleStart;
+			}
+
+			showReadyScreen(trigger);
+		}
+
+		// Debounce timer for file changes
+		let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+		const DEBOUNCE_MS = 150;
+
+		// Pending changes during debounce
+		let pendingTrigger: string | null = null;
+		let pendingIsTerraform: boolean = false;
+
+		// Handle file change with debouncing
+		function handleFileChange(trigger: string, isTerraform: boolean = false): void {
+			pendingTrigger = trigger;
+			pendingIsTerraform = isTerraform;
+
+			if (debounceTimer) {
+				clearTimeout(debounceTimer);
+			}
+
+			debounceTimer = setTimeout(async () => {
+				debounceTimer = null;
+				const triggerName = pendingTrigger || trigger;
+				const terraformOnly = pendingIsTerraform;
+				pendingTrigger = null;
+				pendingIsTerraform = false;
+
+				if (terraformOnly && localstackEnabled) {
+					await runTerraformCycle(triggerName);
+				} else {
+					await runBuildCycle(triggerName);
+				}
+			}, DEBOUNCE_MS);
+		}
+
+		// Initial build
+		await runBuildCycle();
+
+		// Set up lambda file watcher
+		const lambdaWatcher = watch(
+			lambdasDir,
+			{ recursive: false },
+			(event, filename) => {
+				if (
+					!filename ||
+					!filename.endsWith(".ts") ||
+					filename.startsWith("__")
+				) {
+					return;
+				}
+
+				handleFileChange(filename, false);
+			},
+		);
+
+		// Set up terraform watcher if LocalStack is enabled
+		let terraformWatcher: ReturnType<typeof watch> | null = null;
+
+		if (localstackEnabled && existsSync(terraformDir)) {
+			terraformWatcher = watch(
+				terraformDir,
+				{ recursive: false },
+				(event, filename) => {
+					if (!filename) return;
+
+					// Skip auto-generated files
+					if (
+						filename === config.terraform.tfvarsFilename ||
+						filename.endsWith(".auto.tfvars") ||
+						filename.startsWith(".terraform") ||
+						filename.endsWith(".tfstate") ||
+						filename.endsWith(".tfstate.backup")
+					) {
+						return;
+					}
+
+					// Only watch .tf files
+					if (!filename.endsWith(".tf")) {
+						return;
+					}
+
+					handleFileChange(filename, true);
+				},
+			);
+		}
 
 		// Handle graceful shutdown
 		process.on("SIGINT", () => {
-			console.log("");
-			consola.info("Stopping watcher...");
-			watcher.close();
+			ui.blank();
+			ui.info("Stopping...");
+			lambdaWatcher.close();
+			if (terraformWatcher) {
+				terraformWatcher.close();
+			}
+
+			// Clear debounce timer
+			if (debounceTimer) {
+				clearTimeout(debounceTimer);
+			}
 
 			// Clean up temp directory
-			const { rmSync } = require("fs");
 			try {
 				rmSync(tempDir, { recursive: true, force: true });
 			} catch {

@@ -3,13 +3,10 @@
  */
 
 import { defineCommand } from "citty";
-import consola from "consola";
-import pc from "picocolors";
 import { existsSync, mkdirSync } from "fs";
 import { resolve, basename } from "path";
 import {
 	detectProject,
-	type ProjectInfo,
 } from "./init/detect";
 import {
 	promptTargetDirectory,
@@ -22,6 +19,7 @@ import {
 	installDependencies,
 	printResults,
 } from "./init/scaffold";
+import { ui, pc } from "../ui";
 
 export const initCommand = defineCommand({
 	meta: {
@@ -36,12 +34,14 @@ export const initCommand = defineCommand({
 		},
 	},
 	async run({ args }) {
+		ui.header();
+
 		const originalCwd = process.cwd();
 
 		// Step 1: Get target directory
 		const targetDir = await promptTargetDirectory(basename(originalCwd));
 		if (!targetDir) {
-			consola.info("Cancelled");
+			ui.info("Cancelled");
 			process.exit(0);
 		}
 
@@ -52,7 +52,7 @@ export const initCommand = defineCommand({
 		// Create directory if it doesn't exist
 		if (!existsSync(cwd)) {
 			mkdirSync(cwd, { recursive: true });
-			consola.success(`Created directory: ${targetDir}`);
+			ui.success(`Created directory: ${targetDir}`);
 		}
 
 		// Detect project state in target directory
@@ -60,9 +60,7 @@ export const initCommand = defineCommand({
 
 		// Check for existing config (unless force)
 		if (info.hasElysianConfig && !args.force) {
-			consola.error(
-				"elysian.config.ts already exists. Use --force to overwrite.",
-			);
+			ui.error("elysian.config.ts already exists. Use --force to overwrite.");
 			process.exit(1);
 		}
 
@@ -72,7 +70,7 @@ export const initCommand = defineCommand({
 		if (info.isEmpty) {
 			const result = await runFreshProjectWizard(name);
 			if (!result) {
-				consola.info("Cancelled");
+				ui.info("Cancelled");
 				process.exit(0);
 			}
 			answers = {
@@ -82,7 +80,7 @@ export const initCommand = defineCommand({
 		} else {
 			const result = await runExistingProjectWizard(name, info.packageManager);
 			if (!result) {
-				consola.info("Cancelled");
+				ui.info("Cancelled");
 				process.exit(0);
 			}
 			answers = {
@@ -102,36 +100,38 @@ export const initCommand = defineCommand({
 			try {
 				await installDependencies(cwd, answers.packageManager);
 			} catch (error) {
-				consola.error(
+				ui.error(
 					error instanceof Error ? error.message : "Failed to install dependencies",
 				);
-				consola.info(
+				ui.info(
 					`You can manually install with: ${answers.packageManager} add elysia @actuallyjamez/elysian`,
 				);
 			}
 		}
 
 		// Print next steps
-		console.log("");
+		ui.blank();
 		const pm = answers.packageManager;
 		const runCmd = pm === "npm" ? "npm run" : pm;
 
-		// If we created in a subdirectory, tell user to cd into it
-		const cdStep = targetDir !== "." ? `cd ${targetDir}\n` : "";
+		ui.success("Project initialized!");
+		ui.blank();
+		ui.section("Next steps");
 
-		console.log(`  ${pc.green("✓")} Project initialized!`);
-		console.log();
-		console.log(`  ${pc.bold("Next steps")}:`);
-		console.log();
-		if (cdStep) {
-			console.log(`    ${cdStep}`);
+		// If we created in a subdirectory, tell user to cd into it
+		if (targetDir !== ".") {
+			console.log(`    cd ${targetDir}`);
+			ui.blank();
 		}
+
 		if (!answers.installDeps) {
 			console.log(`    ${pm} add elysia @actuallyjamez/elysian`);
-			console.log();
+			ui.blank();
 		}
+
 		console.log(`    ${runCmd} elysian build`);
-		console.log();
+		ui.blank();
 		console.log(`    cd terraform && terraform init && terraform apply`);
+		ui.blank();
 	},
 });

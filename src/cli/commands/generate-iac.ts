@@ -3,13 +3,13 @@
  */
 
 import { defineCommand } from "citty";
-import consola from "consola";
 import { readdirSync, existsSync, mkdirSync } from "fs";
 import { join } from "path";
 import { loadConfig } from "../../core/config";
 import { generateManifest, writeManifest } from "../../core/manifest";
 import { writeTerraformVars } from "../../core/terraform";
 import { getOriginalLambdaName } from "../../core/naming";
+import { ui, pc, formatDuration } from "../ui";
 
 export const generateIacCommand = defineCommand({
 	meta: {
@@ -18,13 +18,16 @@ export const generateIacCommand = defineCommand({
 	},
 	args: {},
 	async run() {
-		consola.start("Loading configuration...");
+		const startTime = Date.now();
 
+		ui.header();
+
+		// Load config
 		let config;
 		try {
 			config = await loadConfig();
 		} catch (error) {
-			consola.error(error instanceof Error ? error.message : error);
+			ui.error(error instanceof Error ? error.message : String(error));
 			process.exit(1);
 		}
 
@@ -34,9 +37,8 @@ export const generateIacCommand = defineCommand({
 
 		// Check that build output exists
 		if (!existsSync(outputDir)) {
-			consola.error(
-				`Build output directory not found: ${outputDir}\nRun 'elysian build' first.`,
-			);
+			ui.error(`Build output directory not found: ${outputDir}`);
+			ui.info("Run 'elysian build' first");
 			process.exit(1);
 		}
 
@@ -49,9 +51,8 @@ export const generateIacCommand = defineCommand({
 		);
 
 		if (jsFiles.length === 0) {
-			consola.error(
-				`No built lambda files found in ${outputDir}\nRun 'elysian build' first.`,
-			);
+			ui.error(`No built lambda files found in ${outputDir}`);
+			ui.info("Run 'elysian build' first");
 			process.exit(1);
 		}
 
@@ -63,10 +64,10 @@ export const generateIacCommand = defineCommand({
 			return `${originalName}.ts`;
 		});
 
-		consola.info(`Found ${lambdaFiles.length} built lambda(s)`);
+		ui.success(`Found ${lambdaFiles.length} built lambda${lambdaFiles.length === 1 ? "" : "s"}`);
 
 		// Generate manifest
-		consola.start("Generating route manifest...");
+		ui.info("Generating route manifest...");
 
 		try {
 			const manifest = await generateManifest(
@@ -79,34 +80,49 @@ export const generateIacCommand = defineCommand({
 			// Write JSON manifest
 			const manifestPath = join(outputDir, "manifest.json");
 			await writeManifest(manifest, manifestPath);
-			consola.success("Generated manifest.json");
+			ui.success("Generated manifest.json");
 
 			// Write Terraform variables
-			const tfvarsPath = await writeTerraformVars(manifest, config);
-			consola.success(`Generated ${config.terraform.tfvarsFilename}`);
+			await writeTerraformVars(manifest, config);
+			ui.success(`Generated ${config.terraform.tfvarsFilename}`);
 
-			// Print summary
-			console.log("");
-			consola.box(
-				`Infrastructure files generated\n\n` +
-					`Lambdas: ${manifest.lambdas.length}\n` +
-					`Routes:  ${manifest.routes.length}\n\n` +
-					`Output: ${config.terraform.outputDir}/${config.terraform.tfvarsFilename}`,
-			);
+			// Route table
+			ui.section("Routes");
 
-			// Print route summary
-			console.log("\nRoute Summary:");
+			// Group routes by lambda
+			const routesByLambda = new Map<string, typeof manifest.routes>();
 			for (const route of manifest.routes) {
-				const params =
-					route.pathParameters.length > 0
-						? ` [${route.pathParameters.join(", ")}]`
-						: "";
-				console.log(
-					`  ${route.method.padEnd(6)} ${route.path.padEnd(30)} → ${route.lambda}${params}`,
-				);
+				const displayName = route.lambda.startsWith(`${name}-`)
+					? route.lambda.slice(name.length + 1)
+					: route.lambda;
+				const existing = routesByLambda.get(displayName) || [];
+				existing.push(route);
+				routesByLambda.set(displayName, existing);
 			}
+
+			// Find longest path for alignment
+			const maxPathLen = Math.max(...manifest.routes.map((r) => r.path.length));
+
+			for (const [displayName, routes] of routesByLambda) {
+				ui.labeled(displayName);
+				for (const route of routes) {
+					ui.route(route.method, route.path, route.pathParameters, maxPathLen);
+				}
+				ui.blank();
+			}
+
+			// Summary
+			ui.divider();
+
+			const duration = Date.now() - startTime;
+			ui.success(
+				`Generated infrastructure for ${pc.bold(String(manifest.lambdas.length))} lambdas (${manifest.routes.length} routes) in ${pc.bold(formatDuration(duration))}`,
+			);
+			ui.blank();
+			ui.keyValue("Output", `${config.terraform.outputDir}/${config.terraform.tfvarsFilename}`);
+			ui.blank();
 		} catch (error) {
-			consola.error(error instanceof Error ? error.message : error);
+			ui.error(error instanceof Error ? error.message : String(error));
 			process.exit(1);
 		}
 	},
