@@ -117,7 +117,7 @@ export const initCommand = defineCommand({
 		const runCmd = pm === "npm" ? "npm run" : pm;
 
 		// If we created in a subdirectory, tell user to cd into it
-		const cdStep = targetDir !== "." ? `cd ${targetDir}\n\n` : "";
+		const cdStep = targetDir !== "." ? `cd ${targetDir}\n` : "";
 
 		console.log(`  ${pc.green("✓")} Project initialized!`);
 		console.log();
