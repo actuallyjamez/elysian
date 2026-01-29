@@ -494,8 +494,14 @@ export const devCommand = defineCommand({
 			ui.blank();
 			if (liveConfig) {
 				console.log(
-					`  ${pc.dim("➜")}  ${pc.bold("API")}  ${pc.cyan(liveConfig.apiEndpoint)}`,
+					`  ${pc.dim("➜")}  ${pc.bold("api")}      ${pc.cyan(liveConfig.apiEndpoint)}`,
 				);
+				if (shouldGenerateOpenApi(config)) {
+					const openapiUrl = liveConfig.apiEndpoint.replace(/\/$/, "") + "/openapi";
+					console.log(
+						`  ${pc.dim("➜")}  ${pc.bold("openapi")}  ${pc.cyan(openapiUrl)}`,
+					);
+				}
 			}
 		}
 
