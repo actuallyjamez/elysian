@@ -1,5 +1,11 @@
 # @actuallyjamez/elysian
 
+## 0.10.0
+
+### Minor Changes
+
+- [`a68f7e9`](https://github.com/actuallyjamez/elysian/commit/a68f7e9aac4f8dd59a4ffb90b09b2ccae6148e05) Thanks [@github-actions[bot]](https://github.com/github-actions%5Bbot%5D)! - improve appsync error handling, remove realtime url from dev output
+
 ## 0.9.1
 
 ### Patch Changes
