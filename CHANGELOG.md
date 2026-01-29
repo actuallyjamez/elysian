@@ -1,5 +1,11 @@
 # @actuallyjamez/elysian
 
+## 0.8.0
+
+### Minor Changes
+
+- [`5a3ca84`](https://github.com/actuallyjamez/elysian/commit/5a3ca842f99f6a999d0c034861b138e59585e7c4) Thanks [@github-actions[bot]](https://github.com/github-actions%5Bbot%5D)! - live mode
+
 ## 0.7.1
 
 ### Patch Changes
