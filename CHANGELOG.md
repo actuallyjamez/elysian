@@ -1,5 +1,11 @@
 # @actuallyjamez/elysian
 
+## 0.9.0
+
+### Minor Changes
+
+- [`016149b`](https://github.com/actuallyjamez/elysian/commit/016149bcfabf6cf09f06701e6fbf9cb41dff30a7) Thanks [@github-actions[bot]](https://github.com/github-actions%5Bbot%5D)! - fix live mode
+
 ## 0.8.0
 
 ### Minor Changes
