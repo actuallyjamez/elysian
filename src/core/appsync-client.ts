@@ -197,13 +197,12 @@ export class AppSyncClient extends EventEmitter {
 				try {
 					const message: AppSyncMessage = JSON.parse(event.data as string);
 					await this.handleMessage(message, resolve, reject, connectionTimeout);
-				} catch (err) {
-					console.error("[appsync] Failed to parse message:", err);
+				} catch {
+					// Ignore parse errors - malformed messages from server
 				}
 			};
 
-			this.ws.onerror = (error) => {
-				console.error("[appsync] WebSocket error:", error);
+			this.ws.onerror = () => {
 				clearTimeout(connectionTimeout);
 				this.config.onError?.(new Error("WebSocket error"));
 			};
@@ -260,8 +259,8 @@ export class AppSyncClient extends EventEmitter {
 						try {
 							const request: InvokeRequest = JSON.parse(eventStr);
 							this.handleInvokeRequest(request);
-						} catch (err) {
-							console.error("[appsync] Failed to parse invoke request:", err);
+						} catch {
+							// Ignore malformed invoke requests
 						}
 					}
 				} else if (message.event) {
@@ -269,8 +268,8 @@ export class AppSyncClient extends EventEmitter {
 					try {
 						const request: InvokeRequest = JSON.parse(message.event);
 						this.handleInvokeRequest(request);
-					} catch (err) {
-						console.error("[appsync] Failed to parse invoke request:", err);
+					} catch {
+						// Ignore malformed invoke requests
 					}
 				} else if (message.payload) {
 					// Single payload format
@@ -281,8 +280,10 @@ export class AppSyncClient extends EventEmitter {
 			}
 
 			case "error":
-				console.error("[appsync] Server error:", message.payload);
-				this.config.onError?.(new Error(JSON.stringify(message.payload)));
+				// Only report if there's an actual error payload
+				if (message.payload) {
+					this.config.onError?.(new Error(JSON.stringify(message.payload)));
+				}
 				break;
 
 			case "connection_error":
@@ -450,7 +451,6 @@ export class AppSyncClient extends EventEmitter {
 	 */
 	private scheduleReconnect(): void {
 		if (this.reconnectAttempts >= this.maxReconnectAttempts) {
-			console.error("[appsync] Max reconnection attempts reached");
 			this.config.onError?.(new Error("Max reconnection attempts reached"));
 			return;
 		}
@@ -458,15 +458,11 @@ export class AppSyncClient extends EventEmitter {
 		const delay = this.reconnectDelay * Math.pow(2, this.reconnectAttempts);
 		this.reconnectAttempts++;
 
-		console.log(
-			`[appsync] Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})`,
-		);
-
 		setTimeout(async () => {
 			try {
 				await this.connect();
-			} catch (err) {
-				console.error("[appsync] Reconnection failed:", err);
+			} catch {
+				// Reconnection failed, will retry via onclose handler
 			}
 		}, delay);
 	}

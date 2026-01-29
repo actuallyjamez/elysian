@@ -494,10 +494,7 @@ export const devCommand = defineCommand({
 			ui.blank();
 			if (liveConfig) {
 				console.log(
-					`  ${pc.dim("➜")}  ${pc.bold("api")}      ${pc.cyan(liveConfig.apiEndpoint)}`,
-				);
-				console.log(
-					`  ${pc.dim("➜")}  ${pc.bold("appsync")}  ${pc.cyan(liveConfig.appSyncHttpEndpoint)}`,
+					`  ${pc.dim("➜")}  ${pc.bold("API")}  ${pc.cyan(liveConfig.apiEndpoint)}`,
 				);
 			}
 		}
