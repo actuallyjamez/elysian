@@ -1,5 +1,11 @@
 # @actuallyjamez/elysian
 
+## 0.6.0
+
+### Minor Changes
+
+- [`8f0108c`](https://github.com/actuallyjamez/elysian/commit/8f0108c0778a293a6bb16490ba23b504df3c2e22) Thanks [@github-actions[bot]](https://github.com/github-actions%5Bbot%5D)! - improved dev command
+
 ## 0.5.1
 
 ### Patch Changes
