@@ -21,8 +21,8 @@ export function exampleLambdaTemplate(): string {
 	return `import { createLambda, t } from "@actuallyjamez/elysian";
 
 export default createLambda()
-	.get("/hello", ({ query }) => {
-		return \`Hello, \${query.name ?? "World"}!\`;
+	.get("/", ({ query }) => {
+		return \`Hello, \${query.name ?? "Elysian"}!\`;
 	}, {
 		response: t.String(),
 		query: t.Object({

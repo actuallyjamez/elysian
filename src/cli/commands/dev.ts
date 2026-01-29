@@ -117,6 +117,7 @@ export const devCommand = defineCommand({
 		// Track last terraform outputs and build info for display
 		let lastOutputs: Record<string, unknown> | null = null;
 		let lastBuildInfo: { lambdas: number; routes: number; duration: number } | null = null;
+		let lastError: string | null = null;
 
 		// Build function for a single lambda
 		async function buildSingleLambda(filename: string): Promise<boolean> {
@@ -155,7 +156,7 @@ export const devCommand = defineCommand({
 		}
 
 		// Build all lambdas (including OpenAPI if enabled)
-		async function buildAll(): Promise<{ success: boolean; count: number }> {
+		async function buildAll(): Promise<{ success: boolean; count: number; error?: string }> {
 			// Refresh lambda file list
 			lambdaFiles = readdirSync(lambdasDir).filter(
 				(f) => f.endsWith(".ts") && !f.startsWith("__"),
@@ -173,7 +174,7 @@ export const devCommand = defineCommand({
 			for (const file of filesToBuild) {
 				const success = await buildSingleLambda(file);
 				if (!success) {
-					return { success: false, count: 0 };
+					return { success: false, count: 0, error: `Failed to build ${file}` };
 				}
 			}
 
@@ -186,7 +187,7 @@ export const devCommand = defineCommand({
 		}
 
 		// Generate manifest and terraform vars
-		async function generateManifestFiles(): Promise<{ success: boolean; routes: number }> {
+		async function generateManifestFiles(): Promise<{ success: boolean; routes: number; error?: string }> {
 			try {
 				const filesToManifest = [...lambdaFiles];
 				if (shouldGenerateOpenApi(config)) {
@@ -205,23 +206,23 @@ export const devCommand = defineCommand({
 				await writeTerraformVars(manifest, config);
 
 				return { success: true, routes: manifest.routes.length };
-			} catch {
-				return { success: false, routes: 0 };
+			} catch (err) {
+				return { success: false, routes: 0, error: err instanceof Error ? err.message : String(err) };
 			}
 		}
 
 		// Deploy to LocalStack
-		async function deployToLocalStack(): Promise<boolean> {
+		async function deployToLocalStack(): Promise<{ success: boolean; error?: string }> {
 			const applyResult = await runTfLocalApply(terraformDir);
 
 			if (!applyResult.success) {
-				return false;
+				return { success: false, error: applyResult.error };
 			}
 
 			// Get and store outputs (transformed to LocalStack URLs)
 			lastOutputs = await getTerraformOutputs(terraformDir, true);
 
-			return true;
+			return { success: true };
 		}
 
 		// Show the final status screen (Vite-like)
@@ -233,6 +234,18 @@ export const devCommand = defineCommand({
 				ui.error("Build failed");
 				if (trigger) {
 					ui.info(`Triggered by: ${trigger}`);
+				}
+				if (lastError) {
+					ui.blank();
+					console.log(pc.dim("  Error:"));
+					// Show first few lines of error
+					const errorLines = lastError.split("\n").slice(0, 10);
+					for (const line of errorLines) {
+						console.log(pc.red(`  ${line}`));
+					}
+					if (lastError.split("\n").length > 10) {
+						console.log(pc.dim("  ... (truncated)"));
+					}
 				}
 			} else if (lastBuildInfo) {
 				ui.success(
@@ -278,6 +291,7 @@ export const devCommand = defineCommand({
 		// Run the full build and deploy cycle
 		async function runBuildCycle(trigger?: string): Promise<void> {
 			const cycleStart = Date.now();
+			lastError = null;
 
 			// Show building status
 			ui.clear();
@@ -294,6 +308,7 @@ export const devCommand = defineCommand({
 
 			if (!buildResult.success) {
 				buildSpinner.fail("Build failed");
+				lastError = buildResult.error || "Unknown build error";
 				showReadyScreen(trigger, true);
 				return;
 			}
@@ -306,6 +321,7 @@ export const devCommand = defineCommand({
 
 			if (!manifestResult.success) {
 				manifestSpinner.fail("Manifest failed");
+				lastError = manifestResult.error || "Unknown manifest error";
 				showReadyScreen(trigger, true);
 				return;
 			}
@@ -315,10 +331,11 @@ export const devCommand = defineCommand({
 			// Deploy if LocalStack enabled
 			if (localstackEnabled) {
 				const deploySpinner = createSpinner("Deploying...").start();
-				const deploySuccess = await deployToLocalStack();
+				const deployResult = await deployToLocalStack();
 
-				if (!deploySuccess) {
+				if (!deployResult.success) {
 					deploySpinner.fail("Deploy failed");
+					lastError = deployResult.error || "Unknown deploy error";
 					showReadyScreen(trigger, true);
 					return;
 				}
@@ -341,6 +358,7 @@ export const devCommand = defineCommand({
 		// Run terraform-only deploy
 		async function runTerraformCycle(trigger: string): Promise<void> {
 			const cycleStart = Date.now();
+			lastError = null;
 
 			ui.clear();
 			ui.header(pc.dim("dev"));
@@ -348,10 +366,11 @@ export const devCommand = defineCommand({
 			ui.blank();
 
 			const deploySpinner = createSpinner("Deploying...").start();
-			const deploySuccess = await deployToLocalStack();
+			const deployResult = await deployToLocalStack();
 
-			if (!deploySuccess) {
+			if (!deployResult.success) {
 				deploySpinner.fail("Deploy failed");
+				lastError = deployResult.error || "Unknown deploy error";
 				showReadyScreen(trigger, true);
 				return;
 			}
@@ -428,13 +447,15 @@ export const devCommand = defineCommand({
 				(event, filename) => {
 					if (!filename) return;
 
-					// Skip auto-generated files
+					// Skip auto-generated files and tflocal override files
 					if (
 						filename === config.terraform.tfvarsFilename ||
 						filename.endsWith(".auto.tfvars") ||
 						filename.startsWith(".terraform") ||
 						filename.endsWith(".tfstate") ||
-						filename.endsWith(".tfstate.backup")
+						filename.endsWith(".tfstate.backup") ||
+						filename.includes("override") ||
+						filename.startsWith("localstack")
 					) {
 						return;
 					}
