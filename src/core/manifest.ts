@@ -126,10 +126,10 @@ export async function generateManifest(
 				// Determine which lambda should handle this route
 				let targetLambda = bundleName;
 
-				// OpenAPI routes always go to __openapi__ lambda if enabled
+				// OpenAPI routes always go to openapi lambda if enabled
 				if (openapiEnabled && path.startsWith("/openapi")) {
-					targetLambda = name ? getLambdaBundleName(name, "__openapi__") : "__openapi__";
-				} else if (originalName === "__openapi__") {
+					targetLambda = name ? getLambdaBundleName(name, "openapi") : "openapi";
+				} else if (originalName === "openapi") {
 					// Skip non-openapi routes from openapi aggregator lambda
 					continue;
 				}

@@ -94,7 +94,7 @@ export async function writeOpenApiLambda(
 	tempDir: string,
 ): Promise<string> {
 	const source = generateOpenApiLambdaSource(lambdaFiles, lambdasDir, config);
-	const outputPath = join(tempDir, "__openapi__.ts");
+	const outputPath = join(tempDir, "openapi.ts");
 
 	await Bun.write(outputPath, source);
 	return outputPath;
@@ -111,7 +111,7 @@ export function shouldGenerateOpenApi(config: ResolvedConfig): boolean {
  * Clean up the generated OpenAPI lambda file
  */
 export async function cleanupOpenApiLambda(tempDir: string): Promise<void> {
-	const openApiPath = join(tempDir, "__openapi__.ts");
+	const openApiPath = join(tempDir, "openapi.ts");
 	try {
 		const file = Bun.file(openApiPath);
 		if (await file.exists()) {

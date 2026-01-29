@@ -14,7 +14,7 @@ export function generateTerraformVars(
 	manifest: ApiManifest,
 	config: ResolvedConfig,
 ): string {
-	// Get unique lambda names from routes (excludes __openapi__ prefix for cleaner naming)
+	// Get unique lambda names from routes
 	const lambdaNames = [...new Set(manifest.routes.map((r) => r.lambda))];
 
 	const routeEntries = manifest.routes.map((route) => {

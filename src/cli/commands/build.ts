@@ -81,7 +81,7 @@ export const buildCommand = defineCommand({
 		// Generate OpenAPI aggregator if enabled
 		if (shouldGenerateOpenApi(config)) {
 			await writeOpenApiLambda(lambdaFiles, lambdasDir, config, tempDir);
-			lambdaFiles.push("__openapi__.ts");
+			lambdaFiles.push("openapi.ts");
 		}
 
 		// Build phase
@@ -98,7 +98,7 @@ export const buildCommand = defineCommand({
 			const lambdaName = file.replace(/\.ts$/, "");
 			const bundleName = getLambdaBundleName(name, lambdaName);
 			// For OpenAPI, the source is in tempDir; for regular lambdas, it's in lambdasDir
-			const inputPath = file === "__openapi__.ts" 
+			const inputPath = file === "openapi.ts" 
 				? join(tempDir, file)
 				: join(lambdasDir, file);
 

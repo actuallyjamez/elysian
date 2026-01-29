@@ -205,6 +205,19 @@ export const devCommand = defineCommand({
 			);
 		}
 
+		/**
+		 * Get all lambda bundle names including the openapi lambda if enabled
+		 */
+		function getAllLambdaNames(): string[] {
+			const names = lambdaFiles.map((file) =>
+				getLambdaBundleName(name, file.replace(/\.ts$/, "")),
+			);
+			if (shouldGenerateOpenApi(config)) {
+				names.push(getLambdaBundleName(name, "openapi"));
+			}
+			return names;
+		}
+
 		async function ensureInfrastructure(spinnerLabel: string | null = "Initializing...") {
 			const spinner = spinnerLabel ? createSpinner(spinnerLabel).start() : null;
 			const applyResult = usingLocalStack
@@ -235,9 +248,7 @@ export const devCommand = defineCommand({
 					httpEndpoint: config.appSyncHttpEndpoint,
 					realtimeEndpoint: config.appSyncRealtimeEndpoint,
 					apiKey: config.appSyncApiKey,
-					lambdaNames: lambdaFiles.map((file) =>
-						getLambdaBundleName(name, file.replace(/\.ts$/, "")),
-					),
+					lambdaNames: getAllLambdaNames(),
 					onInvoke: async (request) => {
 						log(`Received invoke: ${request.lambdaName} (${request.requestId})`);
 						const response = await runner.invoke(request);
@@ -298,11 +309,7 @@ export const devCommand = defineCommand({
 				duration: Date.now() - start,
 			};
 
-			await appsyncClient.updateLambdas(
-				lambdaFiles.map((file) =>
-					getLambdaBundleName(name, file.replace(/\.ts$/, "")),
-				),
-			);
+			await appsyncClient.updateLambdas(getAllLambdaNames());
 			await workerRunner?.reloadAll();
 
 			showReadyScreen(trigger);
@@ -350,11 +357,7 @@ export const devCommand = defineCommand({
 			};
 
 			// Update subscriptions if lambda list changed
-			await appsyncClient.updateLambdas(
-				lambdaFiles.map((file) =>
-					getLambdaBundleName(name, file.replace(/\.ts$/, "")),
-				),
-			);
+			await appsyncClient.updateLambdas(getAllLambdaNames());
 
 			// Reload workers to pick up new code
 			await workerRunner?.reloadAll();
@@ -368,7 +371,7 @@ export const devCommand = defineCommand({
 
 			if (shouldGenerateOpenApi(config)) {
 				await writeOpenApiLambda(lambdaFiles, lambdasDir, config, tempDir);
-				filesToBuild.push("__openapi__.ts");
+				filesToBuild.push("openapi.ts");
 			}
 
 			await ensureStubBundled();
@@ -390,7 +393,7 @@ export const devCommand = defineCommand({
 		async function bundleSingle(filename: string): Promise<{ success: boolean; error?: string }> {
 			const lambdaName = filename.replace(/\.ts$/, "");
 			const bundleName = getLambdaBundleName(name, lambdaName);
-			const sourcePath = filename === "__openapi__.ts"
+			const sourcePath = filename === "openapi.ts"
 				? join(tempDir, filename)
 				: join(lambdasDir, filename);
 
@@ -441,7 +444,7 @@ export const devCommand = defineCommand({
 			try {
 				const filesToManifest = [...lambdaFiles];
 				if (shouldGenerateOpenApi(config)) {
-					filesToManifest.push("__openapi__.ts");
+					filesToManifest.push("openapi.ts");
 				}
 
 				const manifest = await generateManifest(
@@ -513,6 +516,10 @@ export const devCommand = defineCommand({
 					{ recursive: false },
 					(event, filename) => {
 						if (!filename || !filename.endsWith(".tf")) {
+							return;
+						}
+						// Ignore temp files created during terraform apply
+						if (filename === "localstack_providers_override.tf") {
 							return;
 						}
 						scheduleBuild(filename, "terraform");
