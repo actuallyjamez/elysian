@@ -37,15 +37,41 @@ export async function bundleLambda(
 		});
 
 		if (!result.success) {
-			const errors = result.logs
+			// Extract detailed error messages from build logs
+			const errorMessages = result.logs
 				.filter((log) => log.level === "error")
-				.map((log) => log.message)
-				.join("\n");
+				.map((log) => {
+					// Include file position if available
+					const position = log.position;
+					if (position) {
+						return `${position.file}:${position.line}:${position.column}: ${log.message}`;
+					}
+					return log.message;
+				});
+			
+			// Also include warnings that might be relevant
+			const warningMessages = result.logs
+				.filter((log) => log.level === "warning")
+				.map((log) => log.message);
+			
+			const allMessages = [...errorMessages, ...warningMessages];
+
+			// If no messages captured, try to get string representation of all logs
+			if (allMessages.length === 0 && result.logs.length > 0) {
+				const allLogs = result.logs.map((log) => `[${log.level}] ${log.message}`);
+				return {
+					name,
+					outputPath: join(outputDir, `${name}.js`),
+					success: false,
+					error: allLogs.join("\n") || "Build failed with no error message",
+				};
+			}
+			
 			return {
 				name,
 				outputPath: join(outputDir, `${name}.js`),
 				success: false,
-				error: errors || "Unknown build error",
+				error: allMessages.length > 0 ? allMessages.join("\n") : "Build failed with no error message",
 			};
 		}
 
@@ -55,11 +81,37 @@ export async function bundleLambda(
 			success: true,
 		};
 	} catch (error) {
+		// Handle AggregateError from Bun bundler (contains detailed parse errors)
+		if (error instanceof AggregateError && error.errors?.length > 0) {
+			const errorMessages = error.errors.map((e: unknown) => {
+				// Use Bun.inspect for nicely formatted error output
+				if (typeof Bun !== "undefined" && Bun.inspect) {
+					return Bun.inspect(e);
+				}
+				// Fallback: try to extract message and position
+				const err = e as { message?: string; position?: { file?: string; line?: number; column?: number } };
+				if (err.position) {
+					return `${err.position.file}:${err.position.line}:${err.position.column}: ${err.message}`;
+				}
+				return String(e);
+			});
+			return {
+				name,
+				outputPath: join(outputDir, `${name}.js`),
+				success: false,
+				error: errorMessages.join("\n\n"),
+			};
+		}
+		
+		// Capture full error details including stack trace
+		const errorMessage = error instanceof Error 
+			? `${error.message}${error.stack ? `\n${error.stack}` : ""}`
+			: String(error);
 		return {
 			name,
 			outputPath: join(outputDir, `${name}.js`),
 			success: false,
-			error: error instanceof Error ? error.message : String(error),
+			error: errorMessage,
 		};
 	}
 }

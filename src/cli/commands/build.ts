@@ -13,7 +13,6 @@ import { writeTerraformVars } from "../../core/terraform";
 import {
 	shouldGenerateOpenApi,
 	writeOpenApiLambda,
-	cleanupOpenApiLambda,
 } from "../../core/openapi";
 import { createWrapperEntry } from "../../core/handler-wrapper";
 import { getLambdaBundleName } from "../../core/naming";
@@ -65,6 +64,10 @@ export const buildCommand = defineCommand({
 		mkdirSync(outputDir, { recursive: true });
 		mkdirSync(terraformDir, { recursive: true });
 
+		// Create temp directory for generated files
+		const tempDir = join(outputDir, "__temp__");
+		mkdirSync(tempDir, { recursive: true });
+
 		// Get lambda files
 		let lambdaFiles = readdirSync(lambdasDir).filter(
 			(f) => f.endsWith(".ts") && !f.startsWith("__"),
@@ -77,15 +80,12 @@ export const buildCommand = defineCommand({
 
 		// Generate OpenAPI aggregator if enabled
 		if (shouldGenerateOpenApi(config)) {
-			await writeOpenApiLambda(lambdaFiles, lambdasDir, config);
+			await writeOpenApiLambda(lambdaFiles, lambdasDir, config, tempDir);
 			lambdaFiles.push("__openapi__.ts");
 		}
 
 		// Build phase
 		ui.success(`Compiling ${lambdaFiles.length} lambdas...`);
-
-		const tempDir = join(outputDir, "__temp__");
-		mkdirSync(tempDir, { recursive: true });
 
 		const buildResults: Array<{
 			name: string;
@@ -97,7 +97,10 @@ export const buildCommand = defineCommand({
 		for (const file of lambdaFiles) {
 			const lambdaName = file.replace(/\.ts$/, "");
 			const bundleName = getLambdaBundleName(name, lambdaName);
-			const inputPath = join(lambdasDir, file);
+			// For OpenAPI, the source is in tempDir; for regular lambdas, it's in lambdasDir
+			const inputPath = file === "__openapi__.ts" 
+				? join(tempDir, file)
+				: join(lambdasDir, file);
 
 			// Create wrapper entry that imports the original and exports handler
 			const wrapperPath = join(tempDir, `${lambdaName}-wrapper.ts`);
@@ -117,10 +120,7 @@ export const buildCommand = defineCommand({
 		// Clean up temp directory
 		rmSync(tempDir, { recursive: true, force: true });
 
-		// Clean up generated OpenAPI file
-		if (shouldGenerateOpenApi(config)) {
-			await cleanupOpenApiLambda(lambdasDir);
-		}
+		// No need to clean up OpenAPI file separately - it's in tempDir
 
 		// Package phase
 		ui.success("Packaging lambdas...");

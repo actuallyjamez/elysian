@@ -101,7 +101,7 @@ export function tsconfigTemplate(): string {
 				esModuleInterop: true,
 				skipLibCheck: true,
 				noEmit: true,
-				types: ["bun-types"],
+				types: ["@types/node"],
 			},
 			include: ["src/**/*", "elysian.config.ts"],
 			exclude: ["node_modules", "dist"],

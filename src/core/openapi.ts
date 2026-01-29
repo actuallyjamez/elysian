@@ -14,6 +14,7 @@ import type { ResolvedConfig } from "./config";
  */
 export function generateOpenApiLambdaSource(
 	lambdaFiles: string[],
+	lambdasDir: string,
 	config: ResolvedConfig,
 ): string {
 	// Filter out any existing openapi file to avoid circular imports
@@ -24,7 +25,9 @@ export function generateOpenApiLambdaSource(
 	const imports = routeFiles
 		.map((file, index) => {
 			const name = file.replace(/\.ts$/, "");
-			return `import route${index} from "./${name}";`;
+			// Use absolute path to the lambda file
+			const absolutePath = join(lambdasDir, name);
+			return `import route${index} from "${absolutePath}";`;
 		})
 		.join("\n");
 
@@ -71,9 +74,10 @@ export async function writeOpenApiLambda(
 	lambdaFiles: string[],
 	lambdasDir: string,
 	config: ResolvedConfig,
+	tempDir: string,
 ): Promise<string> {
-	const source = generateOpenApiLambdaSource(lambdaFiles, config);
-	const outputPath = join(lambdasDir, "__openapi__.ts");
+	const source = generateOpenApiLambdaSource(lambdaFiles, lambdasDir, config);
+	const outputPath = join(tempDir, "__openapi__.ts");
 
 	await Bun.write(outputPath, source);
 	return outputPath;
@@ -89,8 +93,8 @@ export function shouldGenerateOpenApi(config: ResolvedConfig): boolean {
 /**
  * Clean up the generated OpenAPI lambda file
  */
-export async function cleanupOpenApiLambda(lambdasDir: string): Promise<void> {
-	const openApiPath = join(lambdasDir, "__openapi__.ts");
+export async function cleanupOpenApiLambda(tempDir: string): Promise<void> {
+	const openApiPath = join(tempDir, "__openapi__.ts");
 	try {
 		const file = Bun.file(openApiPath);
 		if (await file.exists()) {

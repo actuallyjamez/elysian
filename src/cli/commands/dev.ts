@@ -15,7 +15,6 @@ import { writeTerraformVars } from "../../core/terraform";
 import {
 	shouldGenerateOpenApi,
 	writeOpenApiLambda,
-	cleanupOpenApiLambda,
 } from "../../core/openapi";
 import {
 	detectLocalStack,
@@ -120,10 +119,13 @@ export const devCommand = defineCommand({
 		let lastError: string | null = null;
 
 		// Build function for a single lambda
-		async function buildSingleLambda(filename: string): Promise<boolean> {
+		async function buildSingleLambda(filename: string): Promise<{ success: boolean; error?: string }> {
 			const lambdaName = filename.replace(/\.ts$/, "");
 			const bundleName = getLambdaBundleName(name, lambdaName);
-			const inputPath = join(lambdasDir, filename);
+			// For OpenAPI, the source is in tempDir; for regular lambdas, it's in lambdasDir
+			const inputPath = filename === "__openapi__.ts"
+				? join(tempDir, filename)
+				: join(lambdasDir, filename);
 
 			// Create wrapper entry
 			const wrapperPath = join(tempDir, `${lambdaName}-wrapper.ts`);
@@ -139,7 +141,7 @@ export const devCommand = defineCommand({
 			);
 
 			if (!buildResult.success) {
-				return false;
+				return { success: false, error: buildResult.error };
 			}
 
 			// Package if not disabled
@@ -148,11 +150,11 @@ export const devCommand = defineCommand({
 				const packageResult = await packageLambda(bundleName, jsPath, outputDir);
 
 				if (!packageResult.success) {
-					return false;
+					return { success: false, error: packageResult.error };
 				}
 			}
 
-			return true;
+			return { success: true };
 		}
 
 		// Build all lambdas (including OpenAPI if enabled)
@@ -166,22 +168,19 @@ export const devCommand = defineCommand({
 
 			// Generate OpenAPI aggregator if enabled
 			if (shouldGenerateOpenApi(config)) {
-				await writeOpenApiLambda(lambdaFiles, lambdasDir, config);
+				await writeOpenApiLambda(lambdaFiles, lambdasDir, config, tempDir);
 				filesToBuild.push("__openapi__.ts");
 			}
 
 			// Build all lambdas
 			for (const file of filesToBuild) {
-				const success = await buildSingleLambda(file);
-				if (!success) {
-					return { success: false, count: 0, error: `Failed to build ${file}` };
+				const result = await buildSingleLambda(file);
+				if (!result.success) {
+					return { success: false, count: 0, error: `${file}: ${result.error || "Unknown error"}` };
 				}
 			}
 
-			// Cleanup OpenAPI source file
-			if (shouldGenerateOpenApi(config)) {
-				await cleanupOpenApiLambda(lambdasDir);
-			}
+			// No need to cleanup OpenAPI - it's in tempDir which persists during dev
 
 			return { success: true, count: filesToBuild.length };
 		}
