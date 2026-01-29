@@ -203,7 +203,7 @@ export async function installDependencies(
 	cwd: string,
 	packageManager: PackageManager,
 ): Promise<void> {
-	const deps = ["elysia", "hono", "@elysiajs/openapi", "@actuallyjamez/elysian"];
+	const deps = ["elysia", "@actuallyjamez/elysian"];
 	const devDeps = ["@types/node", "typescript"];
 
 	const addCmd = packageManager === "npm" ? "install" : "add";

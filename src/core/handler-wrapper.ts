@@ -149,13 +149,32 @@ export const handler = __createElysiaHandler(__route);
 }
 
 /**
+ * Get the path to a module from elysian's node_modules
+ */
+function resolveFromElysian(modulePath: string): string {
+	// Use import.meta.resolve to get the absolute path
+	// This resolves relative to where this code is located (elysian package)
+	try {
+		const resolved = import.meta.resolve(modulePath);
+		// Convert file:// URL to path
+		return resolved.replace("file://", "");
+	} catch {
+		// Fallback to relative import if resolution fails
+		return modulePath;
+	}
+}
+
+/**
  * Create a wrapper entry file that imports and re-exports with handler
  */
 export function createWrapperEntry(originalPath: string): string {
+	const honoTinyPath = resolveFromElysian("hono/tiny");
+	const honoLambdaPath = resolveFromElysian("hono/aws-lambda");
+	
 	return `
 import route from "${originalPath}";
-import { Hono } from "hono/tiny";
-import { handle } from "hono/aws-lambda";
+import { Hono } from "${honoTinyPath}";
+import { handle } from "${honoLambdaPath}";
 
 // Re-export the route as default for introspection
 export default route;
