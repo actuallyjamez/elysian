@@ -1,5 +1,15 @@
 # @actuallyjamez/elysian
 
+## 0.9.1
+
+### Patch Changes
+
+- [`ab2b730`](https://github.com/actuallyjamez/elysian/commit/ab2b7309c16d7f5c8c3f5f885163e2d5bf9a236a) Thanks [@github-actions[bot]](https://github.com/github-actions%5Bbot%5D)! - Fix dev mode issues and improve init command:
+
+  - Fix openapi lambda not being subscribed to AppSync, causing `/openapi` endpoint to hang
+  - Fix terraform file watcher triggering on `localstack_providers_override.tf` temp file
+  - Fix init command to update existing package.json with missing name, version, and scripts fields
+
 ## 0.9.0
 
 ### Minor Changes
