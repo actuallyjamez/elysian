@@ -1,5 +1,58 @@
 # @actuallyjamez/elysian
 
+## 0.12.0
+
+### Minor Changes
+
+- [`5d3baff`](https://github.com/actuallyjamez/elysian/commit/5d3baff812fb18e63bb60aac86c8a06b1bad2847) Thanks [@github-actions[bot]](https://github.com/github-actions%5Bbot%5D)! - Add generic Lambda functions support and improve CLI logging
+
+  **New Features:**
+
+  - Support for generic Lambda functions in `src/functions/` with triggers (schedule, SQS, EventBridge)
+  - New `defineLambda()` API for defining functions with typed triggers
+  - Automatic terraform deployment when trigger configuration changes
+  - Smart manifest diffing to detect infrastructure changes
+
+  **CLI Improvements:**
+
+  - New Signale-based logging system with timestamps and scoped output
+  - Better invocation logging showing function name, trigger type, and duration
+  - Console output from Lambda handlers displays inline with proper formatting
+  - Cleaner dev mode status screen with watching indicator
+
+  **Bug Fixes:**
+
+  - File watchers now create directories if missing, detecting new files properly
+  - Fixed duplicate console output from worker threads
+
+### Patch Changes
+
+- [`2c1bddb`](https://github.com/actuallyjamez/elysian/commit/2c1bddb890f35bebd088fd26b8d80d6eb4398d4b) Thanks [@github-actions[bot]](https://github.com/github-actions%5Bbot%5D)! - Improve dev mode logging and UX
+
+  **Dev Mode Improvements:**
+
+  - Single-line status updates during startup (no more flickering/duplicate lines)
+  - Simplified rebuild output - just one line showing rebuild time
+  - Terraform progress shows resource names during apply (Creating, Updating, Destroying)
+  - API/OpenAPI endpoint URLs are now clickable hyperlinks (OSC 8)
+  - Added blank line after ready screen to separate from invocation logs
+
+  **Scheduled Function Logging:**
+
+  - Scheduled invocations now show interval (e.g., "scheduled every 1m")
+  - "scheduled" displayed in yellow, interval in grey for better visibility
+
+  **Performance:**
+
+  - Reduced LocalStack health check timeout from 2s to 500ms
+  - Removed unnecessary "Detecting LocalStack..." status message
+  - Removed separate "Loading workers..." step
+
+  **Bug Fixes:**
+
+  - Fixed variable hoisting issue with endpoint display flags
+  - Fixed missing colors on awaiting status line
+
 ## 0.11.0
 
 ### Minor Changes
