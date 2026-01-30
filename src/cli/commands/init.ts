@@ -19,7 +19,12 @@ import {
 	installDependencies,
 	printResults,
 } from "./init/scaffold";
-import { ui, pc } from "../ui";
+import {
+	logger,
+	printHeader,
+	printSection,
+	printBlank,
+} from "../logger";
 
 export const initCommand = defineCommand({
 	meta: {
@@ -34,14 +39,14 @@ export const initCommand = defineCommand({
 		},
 	},
 	async run({ args }) {
-		ui.header();
+		printHeader();
 
 		const originalCwd = process.cwd();
 
 		// Step 1: Get target directory
 		const targetDir = await promptTargetDirectory(basename(originalCwd));
 		if (!targetDir) {
-			ui.info("Cancelled");
+			logger.info("Cancelled");
 			process.exit(0);
 		}
 
@@ -52,7 +57,7 @@ export const initCommand = defineCommand({
 		// Create directory if it doesn't exist
 		if (!existsSync(cwd)) {
 			mkdirSync(cwd, { recursive: true });
-			ui.success(`Created directory: ${targetDir}`);
+			logger.success(`Created directory: ${targetDir}`);
 		}
 
 		// Detect project state in target directory
@@ -60,7 +65,7 @@ export const initCommand = defineCommand({
 
 		// Check for existing config (unless force)
 		if (info.hasElysianConfig && !args.force) {
-			ui.error("elysian.config.ts already exists. Use --force to overwrite.");
+			logger.error("elysian.config.ts already exists. Use --force to overwrite.");
 			process.exit(1);
 		}
 
@@ -70,7 +75,7 @@ export const initCommand = defineCommand({
 		if (info.isEmpty) {
 			const result = await runFreshProjectWizard(name);
 			if (!result) {
-				ui.info("Cancelled");
+				logger.info("Cancelled");
 				process.exit(0);
 			}
 			answers = {
@@ -80,7 +85,7 @@ export const initCommand = defineCommand({
 		} else {
 			const result = await runExistingProjectWizard(name, info.packageManager);
 			if (!result) {
-				ui.info("Cancelled");
+				logger.info("Cancelled");
 				process.exit(0);
 			}
 			answers = {
@@ -100,36 +105,36 @@ export const initCommand = defineCommand({
 			try {
 				await installDependencies(cwd, answers.packageManager);
 			} catch (error) {
-				ui.error(
+				logger.error(
 					error instanceof Error ? error.message : "Failed to install dependencies",
 				);
-				ui.info(
+				logger.info(
 					`You can manually install with: ${answers.packageManager} add elysia @actuallyjamez/elysian`,
 				);
 			}
 		}
 
 		// Print next steps
-		ui.blank();
+		printBlank();
 		const pm = answers.packageManager;
 		// const runCmd = pm === "npm" ? "npm run" : pm;
 
-		ui.success("Project initialized!");
-		ui.blank();
-		ui.section("Next steps");
+		logger.success("Project initialized!");
+		printBlank();
+		printSection("Next steps");
 
 		// If we created in a subdirectory, tell user to cd into it
 		if (targetDir !== ".") {
 			console.log(`    cd ${targetDir}`);
-			ui.blank();
+			printBlank();
 		}
 
 		if (!answers.installDeps) {
 			console.log(`    ${pm} add elysia @actuallyjamez/elysian`);
-			ui.blank();
+			printBlank();
 		}
 
 		console.log(`    ${pm} elysian dev`);
-		ui.blank();
+		printBlank();
 	},
 });

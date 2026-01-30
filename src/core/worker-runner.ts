@@ -26,25 +26,30 @@ interface WorkerRequest {
 }
 
 interface WorkerResponse {
-	type: "result" | "error";
+	type: "result" | "error" | "console";
 	requestId: string;
 	result?: LambdaResponse;
 	error?: {
 		message: string;
 		stack?: string;
 	};
+	// Console log fields
+	level?: "log" | "warn" | "error" | "info" | "debug";
+	args?: unknown[];
 }
 
 interface LambdaWorker {
 	worker: Worker;
 	lambdaName: string;
 	bundlePath: string;
+	workerUrl: string; // Store blob URL for cleanup
 	pendingRequests: Map<
 		string,
 		{
 			resolve: (response: InvokeResponse) => void;
 			reject: (error: Error) => void;
 			startTime: number;
+			timeoutId: ReturnType<typeof setTimeout>;
 		}
 	>;
 }
@@ -54,6 +59,12 @@ export interface WorkerRunnerConfig {
 	appName: string;
 	onLog?: (lambdaName: string, message: string) => void;
 	onError?: (lambdaName: string, error: Error) => void;
+	onConsole?: (
+		lambdaName: string,
+		requestId: string,
+		level: "log" | "warn" | "error" | "info" | "debug",
+		args: unknown[],
+	) => void;
 }
 
 /**
@@ -71,13 +82,95 @@ export class WorkerRunner {
 	}
 
 	/**
-	 * Create the worker script that will be used to execute handlers
+	 * Generate the worker script code
 	 */
 	private createWorkerScript(): string {
 		return `
 // Worker script for executing Lambda handlers
 let handler = null;
 let handlerPath = "";
+let currentRequestId = null;
+let currentLambdaName = "";
+
+// ANSI colors
+const dim = "\\x1b[90m";
+const reset = "\\x1b[0m";
+const yellow = "\\x1b[33m";
+const red = "\\x1b[31m";
+
+// Format timestamp to match Signale's format: [12:17:13 AM]
+function formatTime() {
+	const now = new Date();
+	let h = now.getHours();
+	const m = now.getMinutes().toString().padStart(2, "0");
+	const s = now.getSeconds().toString().padStart(2, "0");
+	const ampm = h >= 12 ? "PM" : "AM";
+	h = h % 12;
+	h = h ? h : 12; // 0 should be 12
+	return "[" + h + ":" + m + ":" + s + " " + ampm + "]";
+}
+
+// Format log output to match Signale's scoped output style
+function formatLog(level, args) {
+	const time = formatTime();
+	const name = currentLambdaName || "worker";
+	const msg = args.map(a => typeof a === "string" ? a : JSON.stringify(a)).join(" ");
+	
+	// Match Signale's format: [HH:MM:SS AM] [scope] › symbol message
+	let symbol = dim + "│" + reset;
+	if (level === "warn") {
+		symbol = yellow + "⚠" + reset;
+	} else if (level === "error") {
+		symbol = red + "✖" + reset;
+	}
+	
+	return dim + time + reset + " [" + name + "] › " + symbol + "  " + msg;
+}
+
+// Override console methods to format output consistently
+const originalConsole = {
+	log: console.log.bind(console),
+	warn: console.warn.bind(console),
+	error: console.error.bind(console),
+	info: console.info.bind(console),
+	debug: console.debug.bind(console),
+};
+
+console.log = function(...args) {
+	if (currentRequestId) {
+		originalConsole.log(formatLog("log", args));
+	} else {
+		originalConsole.log(...args);
+	}
+};
+console.warn = function(...args) {
+	if (currentRequestId) {
+		originalConsole.warn(formatLog("warn", args));
+	} else {
+		originalConsole.warn(...args);
+	}
+};
+console.error = function(...args) {
+	if (currentRequestId) {
+		originalConsole.error(formatLog("error", args));
+	} else {
+		originalConsole.error(...args);
+	}
+};
+console.info = function(...args) {
+	if (currentRequestId) {
+		originalConsole.log(formatLog("info", args));
+	} else {
+		originalConsole.info(...args);
+	}
+};
+console.debug = function(...args) {
+	if (currentRequestId) {
+		originalConsole.log(formatLog("debug", args));
+	} else {
+		originalConsole.debug(...args);
+	}
+};
 
 self.onmessage = async (event) => {
 	const message = event.data;
@@ -114,6 +207,10 @@ self.onmessage = async (event) => {
 			return;
 		}
 
+		// Set current request context for console formatting
+		currentRequestId = message.requestId;
+		currentLambdaName = message.displayName || "lambda";
+
 		try {
 			const result = await handler(message.event, message.context);
 			self.postMessage({
@@ -127,6 +224,10 @@ self.onmessage = async (event) => {
 				requestId: message.requestId,
 				error: { message: err.message, stack: err.stack }
 			});
+		} finally {
+			// Clear request context after invocation
+			currentRequestId = null;
+			currentLambdaName = "";
 		}
 		return;
 	}
@@ -169,6 +270,7 @@ self.onmessage = async (event) => {
 			worker,
 			lambdaName,
 			bundlePath,
+			workerUrl,
 			pendingRequests: new Map(),
 		};
 
@@ -228,9 +330,14 @@ self.onmessage = async (event) => {
 		lambdaWorker: LambdaWorker,
 		message: WorkerResponse,
 	): void {
+		// Note: Console messages are now handled directly by the worker via stdout
+		// We only handle result/error messages here
+		
 		if (message.type === "result" || message.type === "error") {
 			const pending = lambdaWorker.pendingRequests.get(message.requestId);
 			if (pending) {
+				// Clear the timeout to prevent memory leaks
+				clearTimeout(pending.timeoutId);
 				lambdaWorker.pendingRequests.delete(message.requestId);
 				const duration = Date.now() - pending.startTime;
 
@@ -275,25 +382,13 @@ self.onmessage = async (event) => {
 	 */
 	async invoke(request: InvokeRequest): Promise<InvokeResponse> {
 		const lambdaWorker = await this.getWorker(request.lambdaName);
+		
+		// Get display name (strip app prefix)
+		const displayName = getOriginalLambdaName(this.config.appName, request.lambdaName);
 
 		return new Promise((resolve, reject) => {
-			// Add to pending requests
-			lambdaWorker.pendingRequests.set(request.requestId, {
-				resolve,
-				reject,
-				startTime: Date.now(),
-			});
-
-			// Send invoke message to worker
-			lambdaWorker.worker.postMessage({
-				type: "invoke",
-				requestId: request.requestId,
-				event: request.event,
-				context: request.context,
-			});
-
 			// Timeout handling (15 minutes max like Lambda)
-			setTimeout(
+			const timeoutId = setTimeout(
 				() => {
 					const pending = lambdaWorker.pendingRequests.get(request.requestId);
 					if (pending) {
@@ -307,6 +402,23 @@ self.onmessage = async (event) => {
 				},
 				15 * 60 * 1000,
 			);
+
+			// Add to pending requests with timeout reference
+			lambdaWorker.pendingRequests.set(request.requestId, {
+				resolve,
+				reject,
+				startTime: Date.now(),
+				timeoutId,
+			});
+
+			// Send invoke message to worker
+			lambdaWorker.worker.postMessage({
+				type: "invoke",
+				requestId: request.requestId,
+				displayName,
+				event: request.event,
+				context: request.context,
+			});
 		});
 	}
 
@@ -319,9 +431,12 @@ self.onmessage = async (event) => {
 		if (existing) {
 			// Terminate old worker
 			existing.worker.terminate();
+			// Revoke blob URL to prevent memory leaks
+			URL.revokeObjectURL(existing.workerUrl);
 
-			// Reject pending requests
+			// Clear timeouts and reject pending requests
 			for (const [requestId, pending] of existing.pendingRequests) {
+				clearTimeout(pending.timeoutId);
 				pending.reject(new Error("Worker reloaded"));
 			}
 
@@ -352,8 +467,11 @@ self.onmessage = async (event) => {
 
 		if (existing) {
 			existing.worker.terminate();
+			// Revoke blob URL to prevent memory leaks
+			URL.revokeObjectURL(existing.workerUrl);
 
 			for (const pending of existing.pendingRequests.values()) {
+				clearTimeout(pending.timeoutId);
 				pending.reject(new Error("Worker removed"));
 			}
 
@@ -367,8 +485,11 @@ self.onmessage = async (event) => {
 	terminate(): void {
 		for (const [lambdaName, lambdaWorker] of this.workers) {
 			lambdaWorker.worker.terminate();
+			// Revoke blob URL to prevent memory leaks
+			URL.revokeObjectURL(lambdaWorker.workerUrl);
 
 			for (const pending of lambdaWorker.pendingRequests.values()) {
+				clearTimeout(pending.timeoutId);
 				pending.reject(new Error("Runner terminated"));
 			}
 		}

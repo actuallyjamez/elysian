@@ -1,32 +1,38 @@
 /**
- * Bun plugin to inject Lambda handler wrapper for default exports
+ * Bun plugin to inject Lambda handler wrapper for API route default exports
  *
- * This transforms:
- *   export default createLambda().get("/hello", ...)
+ * This transforms defineRoutes() exports:
+ *   export default defineRoutes().get("/hello", ...)
  *
  * Into:
- *   const __elysia_route__ = createLambda().get("/hello", ...)
+ *   const __elysia_route__ = defineRoutes().get("/hello", ...)
  *   export default __elysia_route__;
  *   export const handler = __createHandler(__elysia_route__);
+ *
+ * Generic lambdas (defineLambda) are NOT wrapped - they export their own handler.
  */
 
 import type { BunPlugin } from "bun";
 
 /**
- * Create a Bun plugin that wraps default Elysia exports with a Lambda handler
+ * Create a Bun plugin that wraps API route default exports with a Lambda handler.
+ * This plugin is only used for API routes, not generic lambdas.
  */
-export function createHandlerWrapperPlugin(): BunPlugin {
+export function createApiRouteWrapperPlugin(): BunPlugin {
 	return {
-		name: "elysia-apigw-handler-wrapper",
+		name: "elysian-api-route-wrapper",
 		setup(build) {
-			// We'll handle this at the output level instead
+			// We handle this at the output level instead
 			// by appending handler export after bundling
 		},
 	};
 }
 
+// Keep the old name as an alias for backwards compatibility
+export const createHandlerWrapperPlugin = createApiRouteWrapperPlugin;
+
 /**
- * Transform source code to add handler export
+ * Transform source code to add handler export for API routes
  * This is called after the initial bundle to add the handler wrapper
  */
 export function wrapWithHandler(code: string): string {
@@ -43,7 +49,7 @@ export function wrapWithHandler(code: string): string {
 
 	// Add the handler wrapper import and export at the end
 	const handlerCode = `
-// Auto-injected by elysia-apigw
+// Auto-injected by elysian
 import { Hono } from "hono/tiny";
 import { handle } from "hono/aws-lambda";
 
@@ -64,52 +70,25 @@ export const handler = __createHandler(__defaultExport);
 }
 
 /**
- * Alternative approach: Transform the bundle output directly
- * This rewrites the code to capture the default export and wrap it
+ * Transform bundle output for API route Lambda deployment
+ * This adds the Hono handler wrapper for API Gateway integration
  */
-export function transformBundleForLambda(code: string, lambdaName: string): string {
+export function transformBundleForApiRoute(code: string, lambdaName: string): string {
 	// If handler already exists, return as-is
 	if (/export\s+(const|let|var|function)\s+handler\b/.test(code)) {
 		return code;
 	}
 
-	// Find and capture default export, wrap with handler
-	// We use a simple regex-based approach for common patterns
-
-	// Pattern 1: export default <identifier>;
-	// Pattern 2: export default createLambda()...;
-	// Pattern 3: export { something as default };
-
-	// The safest approach is to append a wrapper that re-imports the module
-	// But for a single-file bundle, we need a different strategy
-
-	// For bundled output, we'll use a post-processing approach:
-	// 1. Replace "export default X" with "const __defaultRoute__ = X; export default __defaultRoute__"
-	// 2. Append handler creation
-
-	// Match various default export patterns
-	const patterns = [
-		// export default identifier;
-		/export\s+default\s+(\w+)\s*;/,
-		// export default expression (function call, object, etc)
-		/export\s+default\s+/,
-	];
-
-	let hasDefault = false;
+	// Check for default export
+	let hasDefault = /export\s+default\s+/.test(code);
 	let modifiedCode = code;
 
-	// Check if code has default export
-	if (/export\s+default\s+/.test(code)) {
-		hasDefault = true;
-	}
-
 	if (!hasDefault) {
-		// No default export, check for named route exports and use the first one
+		// Check for named route exports and use the first one
 		const namedExportMatch = code.match(
 			/export\s+(?:const|let|var)\s+(\w+(?:Route|Lambda|App))\s*=/,
 		);
 		if (namedExportMatch) {
-			// Add default export for the route
 			modifiedCode += `\nexport default ${namedExportMatch[1]};\n`;
 			hasDefault = true;
 		}
@@ -122,21 +101,21 @@ export function transformBundleForLambda(code: string, lambdaName: string): stri
 		return code;
 	}
 
-	// Append the handler wrapper
+	// Append the handler wrapper for API routes
 	const handlerWrapper = `
 // ============================================
-// Auto-injected Lambda handler by elysia-apigw
+// Auto-injected Lambda handler by elysian
 // ============================================
 import { Hono as __Hono } from "hono/tiny";
 import { handle as __handle } from "hono/aws-lambda";
 
 // Re-export with handler wrapper
-// The default export should be an Elysia instance
+// The default export should be a defineRoutes() result (Elysia instance)
 const __route = (await import("./index.mjs")).default;
 
 function __createElysiaHandler(route) {
   if (!route || typeof route.fetch !== "function") {
-    throw new Error("Default export must be an Elysia instance with .fetch method");
+    throw new Error("Default export must be a defineRoutes() result with .fetch method");
   }
   const api = new __Hono().mount("/", route.fetch);
   return __handle(api);
@@ -148,29 +127,29 @@ export const handler = __createElysiaHandler(__route);
 	return modifiedCode + handlerWrapper;
 }
 
+// Keep old function name for backwards compatibility
+export const transformBundleForLambda = transformBundleForApiRoute;
+
 /**
  * Get the path to a module from elysian's node_modules
  */
 function resolveFromElysian(modulePath: string): string {
-	// Use import.meta.resolve to get the absolute path
-	// This resolves relative to where this code is located (elysian package)
 	try {
 		const resolved = import.meta.resolve(modulePath);
-		// Convert file:// URL to path
 		return resolved.replace("file://", "");
 	} catch {
-		// Fallback to relative import if resolution fails
 		return modulePath;
 	}
 }
 
 /**
  * Create a wrapper entry file that imports and re-exports with handler
+ * This is used for API routes only
  */
 export function createWrapperEntry(originalPath: string): string {
 	const honoTinyPath = resolveFromElysian("hono/tiny");
 	const honoLambdaPath = resolveFromElysian("hono/aws-lambda");
-	
+
 	return `
 import route from "${originalPath}";
 import { Hono } from "${honoTinyPath}";
@@ -182,5 +161,22 @@ export default route;
 // Create and export the Lambda handler
 const api = new Hono().mount("/", route.fetch);
 export const handler = handle(api);
+`;
+}
+
+/**
+ * Create a wrapper entry file for generic lambdas
+ * Generic lambdas use defineLambda() which exports { trigger, handler }
+ * We need to extract just the handler for Lambda execution
+ */
+export function createGenericLambdaWrapper(originalPath: string): string {
+	return `
+import definition from "${originalPath}";
+
+// Re-export the definition as default for introspection
+export default definition;
+
+// Extract and export the handler from the defineLambda definition
+export const handler = definition.handler;
 `;
 }

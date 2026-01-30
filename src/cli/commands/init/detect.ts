@@ -25,9 +25,9 @@ export interface ProjectInfo {
 		main: boolean;
 		outputs: boolean;
 	};
-	/** Whether src/lambdas/ exists */
-	hasLambdasDir: boolean;
-	/** Whether there are any .ts files in src/lambdas/ */
+	/** Whether src/functions/ exists */
+	hasFunctionsDir: boolean;
+	/** Whether there are any .ts files in src/functions/ */
 	hasLambdaFiles: boolean;
 	/** Directory name (for default name) */
 	directoryName: string;
@@ -99,12 +99,13 @@ function checkTerraformFiles(cwd: string): ProjectInfo["terraformFiles"] {
  * Check if there are any .ts files in the lambdas directory
  */
 function hasLambdaFiles(cwd: string): boolean {
-	const lambdasDir = join(cwd, "src/lambdas");
-	if (!existsSync(lambdasDir)) {
+	const functionsDir = join(cwd, "src/functions");
+	if (!existsSync(functionsDir)) {
 		return false;
 	}
+
 	try {
-		const files = readdirSync(lambdasDir);
+		const files = readdirSync(functionsDir);
 		return files.some((f) => f.endsWith(".ts"));
 	} catch {
 		return false;
@@ -124,7 +125,7 @@ export async function detectProject(cwd: string): Promise<ProjectInfo> {
 		hasElysianConfig: existsSync(join(cwd, "elysian.config.ts")),
 		hasTerraformDir: existsSync(join(cwd, "terraform")),
 		terraformFiles: checkTerraformFiles(cwd),
-		hasLambdasDir: existsSync(join(cwd, "src/lambdas")),
+		hasFunctionsDir: existsSync(join(cwd, "src/functions")),
 		hasLambdaFiles: hasLambdaFiles(cwd),
 		directoryName: basename(cwd),
 	};

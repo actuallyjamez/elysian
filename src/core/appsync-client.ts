@@ -94,10 +94,18 @@ export class AppSyncClient extends EventEmitter {
 	private shouldReconnect = true;
 	private keepAliveInterval: ReturnType<typeof setInterval> | null = null;
 	private subscriptionIds: Map<string, string> = new Map();
+	private idCounter = 0;
 
 	constructor(config: AppSyncClientConfig) {
 		super();
 		this.config = config;
+	}
+
+	/**
+	 * Generate a unique ID for subscriptions/publishes
+	 */
+	private generateId(prefix: string): string {
+		return `${prefix}-${Date.now()}-${++this.idCounter}`;
 	}
 
 	/**
@@ -339,7 +347,7 @@ export class AppSyncClient extends EventEmitter {
 		}
 
 		const channel = `/elysian/invoke/${lambdaName}`;
-		const subscriptionId = `sub-${lambdaName}-${Date.now()}`;
+		const subscriptionId = this.generateId(`sub-${lambdaName}`);
 
 		this.subscriptionIds.set(lambdaName, subscriptionId);
 
@@ -388,7 +396,7 @@ export class AppSyncClient extends EventEmitter {
 		this.ws.send(
 			JSON.stringify({
 				type: "publish",
-				id: `pub-${Date.now()}`,
+				id: this.generateId("pub"),
 				channel,
 				events: [JSON.stringify(response)],
 				authorization: { "x-api-key": this.config.apiKey },

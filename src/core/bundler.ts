@@ -1,138 +1,241 @@
 /**
  * Lambda bundler using Bun.build
+ *
+ * Supports two types of lambdas:
+ * - API routes (src/api/) - bundled with Hono handler wrapper
+ * - Generic functions (src/functions/) - bundled without wrapper
  */
 
-import { build, type BuildConfig as BunBuildConfig } from "bun";
+import { build } from "bun";
 import { join } from "path";
 import type { ResolvedConfig } from "./config";
-import { createHandlerWrapperPlugin } from "./handler-wrapper";
+import { createApiRouteWrapperPlugin } from "./handler-wrapper";
+import type { DiscoveredApiRoute, DiscoveredLambda } from "./discovery";
 
 export interface BundleResult {
 	name: string;
+	bundleName: string;
 	outputPath: string;
 	success: boolean;
 	error?: string;
+	type: "api" | "lambda";
 }
 
 /**
- * Bundle a single lambda file
+ * Bundle a single API route (with Hono wrapper)
  */
+export async function bundleApiRoute(
+	route: DiscoveredApiRoute,
+	outputDir: string,
+	config: ResolvedConfig,
+): Promise<BundleResult> {
+	try {
+		const result = await build({
+			entrypoints: [route.sourcePath],
+			outdir: outputDir,
+			naming: `${route.bundleName}.js`,
+			format: "esm",
+			target: "bun",
+			external: config.build.external,
+			sourcemap: config.build.sourcemap ? "external" : "none",
+			minify: config.build.minify,
+			plugins: [createApiRouteWrapperPlugin()],
+		});
+
+		if (!result.success) {
+			const errorMessages = extractBuildErrors(result.logs);
+			return {
+				name: route.name,
+				bundleName: route.bundleName,
+				outputPath: join(outputDir, `${route.bundleName}.js`),
+				success: false,
+				error: errorMessages || "Build failed with no error message",
+				type: "api",
+			};
+		}
+
+		return {
+			name: route.name,
+			bundleName: route.bundleName,
+			outputPath: join(outputDir, `${route.bundleName}.js`),
+			success: true,
+			type: "api",
+		};
+	} catch (error) {
+		return {
+			name: route.name,
+			bundleName: route.bundleName,
+			outputPath: join(outputDir, `${route.bundleName}.js`),
+			success: false,
+			error: formatError(error),
+			type: "api",
+		};
+	}
+}
+
+/**
+ * Bundle a single generic lambda (without wrapper)
+ */
+export async function bundleGenericLambda(
+	lambda: DiscoveredLambda,
+	outputDir: string,
+	config: ResolvedConfig,
+): Promise<BundleResult> {
+	try {
+		const result = await build({
+			entrypoints: [lambda.sourcePath],
+			outdir: outputDir,
+			naming: `${lambda.bundleName}.js`,
+			format: "esm",
+			target: "bun",
+			external: config.build.external,
+			sourcemap: config.build.sourcemap ? "external" : "none",
+			minify: config.build.minify,
+			// No wrapper plugin - generic lambdas export their own handler
+		});
+
+		if (!result.success) {
+			const errorMessages = extractBuildErrors(result.logs);
+			return {
+				name: lambda.name,
+				bundleName: lambda.bundleName,
+				outputPath: join(outputDir, `${lambda.bundleName}.js`),
+				success: false,
+				error: errorMessages || "Build failed with no error message",
+				type: "lambda",
+			};
+		}
+
+		return {
+			name: lambda.name,
+			bundleName: lambda.bundleName,
+			outputPath: join(outputDir, `${lambda.bundleName}.js`),
+			success: true,
+			type: "lambda",
+		};
+	} catch (error) {
+		return {
+			name: lambda.name,
+			bundleName: lambda.bundleName,
+			outputPath: join(outputDir, `${lambda.bundleName}.js`),
+			success: false,
+			error: formatError(error),
+			type: "lambda",
+		};
+	}
+}
+
+/**
+ * Bundle all API routes
+ */
+export async function bundleAllApiRoutes(
+	routes: DiscoveredApiRoute[],
+	outputDir: string,
+	config: ResolvedConfig,
+): Promise<BundleResult[]> {
+	const results: BundleResult[] = [];
+	for (const route of routes) {
+		const result = await bundleApiRoute(route, outputDir, config);
+		results.push(result);
+	}
+	return results;
+}
+
+/**
+ * Bundle all generic lambdas
+ */
+export async function bundleAllGenericLambdas(
+	lambdas: DiscoveredLambda[],
+	outputDir: string,
+	config: ResolvedConfig,
+): Promise<BundleResult[]> {
+	const results: BundleResult[] = [];
+	for (const lambda of lambdas) {
+		const result = await bundleGenericLambda(lambda, outputDir, config);
+		results.push(result);
+	}
+	return results;
+}
+
+/**
+ * Extract error messages from build logs
+ */
+function extractBuildErrors(logs: readonly { level: string; message: string; position?: { file?: string; line?: number; column?: number } | null }[]): string {
+	const errorMessages = logs
+		.filter((log) => log.level === "error")
+		.map((log) => {
+			const position = log.position;
+			if (position) {
+				return `${position.file}:${position.line}:${position.column}: ${log.message}`;
+			}
+			return log.message;
+		});
+
+	const warningMessages = logs
+		.filter((log) => log.level === "warning")
+		.map((log) => log.message);
+
+	const allMessages = [...errorMessages, ...warningMessages];
+
+	if (allMessages.length === 0 && logs.length > 0) {
+		return logs.map((log) => `[${log.level}] ${log.message}`).join("\n");
+	}
+
+	return allMessages.join("\n");
+}
+
+/**
+ * Format an error for output
+ */
+function formatError(error: unknown): string {
+	if (error instanceof AggregateError && error.errors?.length > 0) {
+		const errorMessages = error.errors.map((e: unknown) => {
+			if (typeof Bun !== "undefined" && Bun.inspect) {
+				return Bun.inspect(e);
+			}
+			const err = e as { message?: string; position?: { file?: string; line?: number; column?: number } };
+			if (err.position) {
+				return `${err.position.file}:${err.position.line}:${err.position.column}: ${err.message}`;
+			}
+			return String(e);
+		});
+		return errorMessages.join("\n\n");
+	}
+
+	if (error instanceof Error) {
+		return `${error.message}${error.stack ? `\n${error.stack}` : ""}`;
+	}
+
+	return String(error);
+}
+
+// Legacy function for backwards compatibility during migration
 export async function bundleLambda(
 	name: string,
 	inputPath: string,
 	outputDir: string,
 	config: ResolvedConfig,
 ): Promise<BundleResult> {
-	try {
-		const result = await build({
-			entrypoints: [inputPath],
-			outdir: outputDir,
-			naming: `${name}.js`,
-			format: "esm",
-			target: "bun",
-			external: config.build.external,
-			sourcemap: config.build.sourcemap ? "external" : "none",
-			minify: config.build.minify,
-			plugins: [createHandlerWrapperPlugin()],
-		});
-
-		if (!result.success) {
-			// Extract detailed error messages from build logs
-			const errorMessages = result.logs
-				.filter((log) => log.level === "error")
-				.map((log) => {
-					// Include file position if available
-					const position = log.position;
-					if (position) {
-						return `${position.file}:${position.line}:${position.column}: ${log.message}`;
-					}
-					return log.message;
-				});
-			
-			// Also include warnings that might be relevant
-			const warningMessages = result.logs
-				.filter((log) => log.level === "warning")
-				.map((log) => log.message);
-			
-			const allMessages = [...errorMessages, ...warningMessages];
-
-			// If no messages captured, try to get string representation of all logs
-			if (allMessages.length === 0 && result.logs.length > 0) {
-				const allLogs = result.logs.map((log) => `[${log.level}] ${log.message}`);
-				return {
-					name,
-					outputPath: join(outputDir, `${name}.js`),
-					success: false,
-					error: allLogs.join("\n") || "Build failed with no error message",
-				};
-			}
-			
-			return {
-				name,
-				outputPath: join(outputDir, `${name}.js`),
-				success: false,
-				error: allMessages.length > 0 ? allMessages.join("\n") : "Build failed with no error message",
-			};
-		}
-
-		return {
-			name,
-			outputPath: join(outputDir, `${name}.js`),
-			success: true,
-		};
-	} catch (error) {
-		// Handle AggregateError from Bun bundler (contains detailed parse errors)
-		if (error instanceof AggregateError && error.errors?.length > 0) {
-			const errorMessages = error.errors.map((e: unknown) => {
-				// Use Bun.inspect for nicely formatted error output
-				if (typeof Bun !== "undefined" && Bun.inspect) {
-					return Bun.inspect(e);
-				}
-				// Fallback: try to extract message and position
-				const err = e as { message?: string; position?: { file?: string; line?: number; column?: number } };
-				if (err.position) {
-					return `${err.position.file}:${err.position.line}:${err.position.column}: ${err.message}`;
-				}
-				return String(e);
-			});
-			return {
-				name,
-				outputPath: join(outputDir, `${name}.js`),
-				success: false,
-				error: errorMessages.join("\n\n"),
-			};
-		}
-		
-		// Capture full error details including stack trace
-		const errorMessage = error instanceof Error 
-			? `${error.message}${error.stack ? `\n${error.stack}` : ""}`
-			: String(error);
-		return {
-			name,
-			outputPath: join(outputDir, `${name}.js`),
-			success: false,
-			error: errorMessage,
-		};
-	}
+	return bundleApiRoute(
+		{ name, sourcePath: inputPath, bundleName: `${config.name}-${name}` },
+		outputDir,
+		config,
+	);
 }
 
-/**
- * Bundle all lambda files in a directory
- */
 export async function bundleAllLambdas(
 	lambdaFiles: string[],
 	lambdasDir: string,
 	outputDir: string,
 	config: ResolvedConfig,
 ): Promise<BundleResult[]> {
-	const results: BundleResult[] = [];
-
-	for (const file of lambdaFiles) {
+	const routes: DiscoveredApiRoute[] = lambdaFiles.map((file) => {
 		const name = file.replace(/\.ts$/, "");
-		const inputPath = join(lambdasDir, file);
-		const result = await bundleLambda(name, inputPath, outputDir, config);
-		results.push(result);
-	}
-
-	return results;
+		return {
+			name,
+			sourcePath: join(lambdasDir, file),
+			bundleName: `${config.name}-${name}`,
+		};
+	});
+	return bundleAllApiRoutes(routes, outputDir, config);
 }

@@ -19,10 +19,32 @@
  * - ELYSIAN_APPSYNC_API_KEY: AppSync API key
  * - ELYSIAN_APP_NAME: Application name for channel namespace
  * - ELYSIAN_LAMBDA_NAME: Name of the Lambda function being invoked
+ * - ELYSIAN_DEBUG: "true" to enable debug logging
  */
 
 import * as http from "http";
 import * as crypto from "crypto";
+
+// Logging prefix for stub Lambda
+const LOG_PREFIX = "[elysian:stub]";
+const DEBUG = process.env.ELYSIAN_DEBUG === "true";
+
+// Debug logging helper - only logs when ELYSIAN_DEBUG is enabled
+function debug(...args: unknown[]): void {
+	if (DEBUG) {
+		console.log(LOG_PREFIX, ...args);
+	}
+}
+
+// Info logging helper - always logs important events
+function info(...args: unknown[]): void {
+	console.log(LOG_PREFIX, ...args);
+}
+
+// Error logging helper - always logs errors
+function error(...args: unknown[]): void {
+	console.error(LOG_PREFIX, ...args);
+}
 
 // Types for Lambda Runtime API
 
@@ -252,7 +274,7 @@ async function connect(): Promise<void> {
 		const isLocalStack = !!process.env.LOCALSTACK_HOSTNAME;
 		const hostHeader = isLocalStack ? originalRealtimeHost : parsedUrl.host;
 		
-		console.log("[stub] Connecting to AppSync:", url, "with Host:", hostHeader);
+		debug("Connecting to AppSync:", url, "with Host:", hostHeader);
 
 		// Use native WebSocket but construct with proper URL
 		// For LocalStack, we need to trick the WebSocket by using the IP but with correct Host
@@ -276,7 +298,7 @@ async function connect(): Promise<void> {
 			});
 
 			req.on("upgrade", (res: any, socket: any, head: any) => {
-				console.log("[stub] WebSocket upgrade successful");
+				debug("WebSocket upgrade successful");
 				
 				// Create a minimal WebSocket-like wrapper around the raw socket
 				ws = createSocketWrapper(socket);
@@ -291,7 +313,7 @@ async function connect(): Promise<void> {
 				ws.onopen?.(null as any);
 				
 				// Send connection_init
-				console.log("[stub] WebSocket connected, sending connection_init");
+				debug("WebSocket connected, sending connection_init");
 				ws.send(JSON.stringify({ type: "connection_init" }));
 
 				ws.onmessage = (event: any) => {
@@ -299,12 +321,12 @@ async function connect(): Promise<void> {
 						const message: AppSyncMessage = JSON.parse(event.data as string);
 						handleMessage(message, resolve, reject, connectionTimeout);
 					} catch (err) {
-						console.error("[stub] Failed to parse message:", err);
+						error("Failed to parse message:", err);
 					}
 				};
 
 				ws.onclose = () => {
-					console.log("[stub] WebSocket closed");
+					debug("WebSocket closed");
 					isConnected = false;
 					connectionPromise = null;
 					ws = null;
@@ -318,14 +340,14 @@ async function connect(): Promise<void> {
 			});
 
 			req.on("error", (error: any) => {
-				console.error("[stub] WebSocket connection error:", error);
+				error("WebSocket connection error:", error);
 				connectionPromise = null;
 				reject(new Error(`WebSocket connection error: ${error.message}`));
 			});
 
 			req.on("response", (res: any) => {
 				// Server responded with HTTP instead of upgrading
-				console.error("[stub] Server did not upgrade, status:", res.statusCode);
+				error("Server did not upgrade, status:", res.statusCode);
 				connectionPromise = null;
 				reject(new Error(`WebSocket upgrade failed with status ${res.statusCode}`));
 			});
@@ -343,7 +365,7 @@ async function connect(): Promise<void> {
 			}, 10000);
 
 			ws.onopen = () => {
-				console.log("[stub] WebSocket connected, sending connection_init");
+				debug("WebSocket connected, sending connection_init");
 				ws!.send(JSON.stringify({ type: "connection_init" }));
 			};
 
@@ -352,12 +374,12 @@ async function connect(): Promise<void> {
 					const message: AppSyncMessage = JSON.parse(event.data as string);
 					handleMessage(message, resolve, reject, connectionTimeout);
 				} catch (err) {
-					console.error("[stub] Failed to parse message:", err);
+					error("Failed to parse message:", err);
 				}
 			};
 
-			ws.onerror = (error) => {
-				console.error("[stub] WebSocket error:", error);
+			ws.onerror = (err) => {
+				error("WebSocket error:", err);
 				clearTimeout(connectionTimeout);
 				isConnected = false;
 				connectionPromise = null;
@@ -365,7 +387,7 @@ async function connect(): Promise<void> {
 			};
 
 			ws.onclose = (event) => {
-				console.log("[stub] WebSocket closed:", event.code, event.reason);
+				debug("WebSocket closed:", event.code, event.reason);
 				isConnected = false;
 				connectionPromise = null;
 				ws = null;
@@ -524,7 +546,7 @@ function handleMessage(
 ): void {
 	switch (message.type) {
 		case "connection_ack":
-			console.log("[stub] Connection acknowledged");
+			debug("Connection acknowledged");
 			clearTimeout(connectionTimeout);
 			isConnected = true;
 			// Subscribe to response channel after connection is established
@@ -538,7 +560,7 @@ function handleMessage(
 			break;
 
 		case "subscribe_success":
-			console.log("[stub] Subscribed to channel:", message.id);
+			debug("Subscribed to channel:", message.id);
 			break;
 
 		case "data":
@@ -557,7 +579,7 @@ function handleMessage(
 							pendingRequests.delete(response.requestId);
 						}
 					} catch (err) {
-						console.error("[stub] Failed to parse response from events array:", err);
+						error("Failed to parse response from events array:", err);
 					}
 				}
 			} else if (message.event) {
@@ -571,7 +593,7 @@ function handleMessage(
 						pendingRequests.delete(response.requestId);
 					}
 				} catch (err) {
-					console.error("[stub] Failed to parse response from event:", err);
+					error("Failed to parse response from event:", err);
 				}
 			} else if (message.payload) {
 				const response = message.payload as InvokeResponse;
@@ -586,15 +608,15 @@ function handleMessage(
 		}
 
 		case "subscribe_error":
-			console.error("[stub] Subscribe error:", JSON.stringify(message));
+			error("Subscribe error:", JSON.stringify(message));
 			break;
 
 		case "error":
-			console.error("[stub] AppSync error:", message.payload);
+			error("AppSync error:", message.payload);
 			break;
 
 		default:
-			console.log("[stub] Unknown message type:", message.type);
+			debug("Unknown message type:", message.type);
 	}
 }
 
@@ -609,7 +631,7 @@ async function subscribeToResponses(): Promise<void> {
 	// Subscribe to response channel: /elysian/response/{lambdaName}
 	const channel = `/elysian/response/${config.lambdaName}`;
 	const subscriptionId = `sub-${config.lambdaName}-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
-	console.log("[stub] Subscribing to channel:", channel, "with id:", subscriptionId);
+	debug("Subscribing to channel:", channel, "with id:", subscriptionId);
 
 	ws.send(
 		JSON.stringify({
@@ -671,8 +693,8 @@ export async function handler(
 	const requestId = generateRequestId();
 	const startTime = Date.now();
 
-	console.log(
-		`[stub] Received invocation for ${config.lambdaName}:`,
+	info(
+		`Received invocation for ${config.lambdaName}:`,
 		event.rawPath || event.routeKey || "unknown",
 	);
 
@@ -707,10 +729,10 @@ export async function handler(
 		const response = await waitForResponse(requestId, timeoutMs);
 
 		const duration = Date.now() - startTime;
-		console.log(`[stub] Response received in ${duration}ms`);
+		info(`Response received in ${duration}ms`);
 
 		if (response.error) {
-			console.error("[stub] Handler error:", response.error.message);
+			error("Handler error:", response.error.message);
 			return {
 				statusCode: 500,
 				body: JSON.stringify({
@@ -728,13 +750,13 @@ export async function handler(
 				headers: { "content-type": "application/json" },
 			}
 		);
-	} catch (error) {
-		console.error("[stub] Stub error:", error);
+	} catch (err) {
+		error("Stub error:", err);
 		return {
 			statusCode: 502,
 			body: JSON.stringify({
 				error: "Live mode connection error",
-				message: error instanceof Error ? error.message : String(error),
+				message: err instanceof Error ? err.message : String(err),
 			}),
 			headers: { "content-type": "application/json" },
 		};

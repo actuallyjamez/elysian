@@ -4,6 +4,7 @@
 
 import consola from "consola";
 import type { PackageManager } from "./detect";
+import { printBlank } from "../../logger";
 
 export interface WizardAnswers {
 	targetDir: string;
@@ -28,7 +29,7 @@ function isCancelled(value: unknown): boolean {
 export async function promptTargetDirectory(
 	currentDirName: string,
 ): Promise<string | null> {
-	console.log("");
+	printBlank();
 
 	const targetDir = await consola.prompt("Where would you like to create your project?", {
 		type: "text",

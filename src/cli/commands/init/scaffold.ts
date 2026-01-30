@@ -9,25 +9,18 @@ import type { PackageManager, ProjectInfo } from "./detect";
 import type { WizardAnswers } from "./prompts";
 import {
 	configTemplate,
-	exampleLambdaTemplate,
+	exampleApiRouteTemplate,
+	exampleGenericLambdaTemplate,
 	packageJsonTemplate,
 	gitignoreTemplate,
 	tsconfigTemplate,
 	ensurePackageJsonFields,
 } from "./templates";
 import {
-	templates as tfTemplates,
-	appendProviders,
-	getMissingVariables,
-	appendMain,
-	appendOutputs,
-} from "./terraform";
-import {
-	templates as tfLiveTemplates,
-	hasAppSyncApi,
-	appendLiveOutputs,
-} from "./terraform-live";
-import { ui } from "../../ui";
+	moduleTemplates,
+	rootTemplates,
+} from "./terraform-module";
+import { logger, printBlank } from "../../logger";
 
 export interface ScaffoldResult {
 	created: string[];
@@ -78,11 +71,15 @@ export async function scaffoldProject(
 	};
 
 	// Create directories
-	const lambdasDir = join(cwd, "src/lambdas");
+	const apiDir = join(cwd, "src/api");
+	const functionsDir = join(cwd, "src/functions");
 	const terraformDir = join(cwd, "terraform");
 
-	if (!existsSync(lambdasDir)) {
-		mkdirSync(lambdasDir, { recursive: true });
+	if (!existsSync(apiDir)) {
+		mkdirSync(apiDir, { recursive: true });
+	}
+	if (!existsSync(functionsDir)) {
+		mkdirSync(functionsDir, { recursive: true });
 	}
 	if (!existsSync(terraformDir)) {
 		mkdirSync(terraformDir, { recursive: true });
@@ -140,10 +137,15 @@ export async function scaffoldProject(
 		result.skipped.push(configPath);
 	}
 
-	// Create example lambda (only if no lambda files exist)
-	const exampleLambdaPath = join(lambdasDir, "hello.ts");
+	// Create example files (only if no lambda files exist)
 	if (!info.hasLambdaFiles) {
-		await writeFile(exampleLambdaPath, exampleLambdaTemplate(), result, false);
+		// Create example API route in src/api/
+		const exampleApiPath = join(apiDir, "hello.ts");
+		await writeFile(exampleApiPath, exampleApiRouteTemplate(), result, false);
+
+		// Create example generic function in src/functions/
+		const exampleFunctionPath = join(functionsDir, "process-queue.ts");
+		await writeFile(exampleFunctionPath, exampleGenericLambdaTemplate(), result, false);
 	}
 
 	// Handle Terraform files
@@ -153,89 +155,53 @@ export async function scaffoldProject(
 }
 
 /**
- * Scaffold Terraform files with smart appending
+ * Scaffold Terraform files with module structure
  */
 async function scaffoldTerraform(
 	cwd: string,
-	info: ProjectInfo,
+	_info: ProjectInfo,
 	name: string,
 	result: ScaffoldResult,
 ): Promise<void> {
 	const tfDir = join(cwd, "terraform");
+	const moduleDir = join(tfDir, "modules", "elysian");
 
-	// providers.tf
-	const providersPath = join(tfDir, "providers.tf");
-	if (info.terraformFiles.providers) {
-		const existing = await readFileOrEmpty(providersPath);
-		const updated = appendProviders(existing);
-		if (updated !== existing) {
-			await writeFile(providersPath, updated, result, true);
-		} else {
-			result.skipped.push(providersPath);
-		}
-	} else {
-		await writeFile(providersPath, tfTemplates.providers, result, false);
+	// Create module directory
+	if (!existsSync(moduleDir)) {
+		mkdirSync(moduleDir, { recursive: true });
 	}
 
-	// variables.tf
-	const variablesPath = join(tfDir, "variables.tf");
-	if (info.terraformFiles.variables) {
-		const existing = await readFileOrEmpty(variablesPath);
-		const updated = getMissingVariables(existing, name);
-		if (updated !== existing) {
-			await writeFile(variablesPath, updated, result, true);
-		} else {
-			result.skipped.push(variablesPath);
-		}
-	} else {
-		await writeFile(variablesPath, tfTemplates.variables(name), result, false);
+	// Write module files (always overwrite - Elysian-managed)
+	const moduleFiles = [
+		{ name: "variables.tf", content: moduleTemplates.variables },
+		{ name: "main.tf", content: moduleTemplates.main },
+		{ name: "iam.tf", content: moduleTemplates.iam },
+		{ name: "live.tf", content: moduleTemplates.live },
+		{ name: "triggers.tf", content: moduleTemplates.triggers },
+		{ name: "outputs.tf", content: moduleTemplates.outputs },
+	];
+
+	for (const file of moduleFiles) {
+		const filePath = join(moduleDir, file.name);
+		const existed = existsSync(filePath);
+		await writeFile(filePath, file.content, result, existed);
 	}
 
-	// main.tf
-	const mainPath = join(tfDir, "main.tf");
-	if (info.terraformFiles.main) {
-		const existing = await readFileOrEmpty(mainPath);
-		const updated = appendMain(existing);
-		if (updated !== existing) {
-			await writeFile(mainPath, updated, result, true);
-		} else {
-			result.skipped.push(mainPath);
-		}
-	} else {
-		await writeFile(mainPath, tfTemplates.main, result, false);
-	}
+	// Write root files (only if they don't exist - user-owned after creation)
+	const rootFiles = [
+		{ name: "providers.tf", content: rootTemplates.providers },
+		{ name: "variables.tf", content: rootTemplates.variables(name) },
+		{ name: "main.tf", content: rootTemplates.main(name) },
+		{ name: "outputs.tf", content: rootTemplates.outputs },
+	];
 
-	// outputs.tf
-	const outputsPath = join(tfDir, "outputs.tf");
-	if (info.terraformFiles.outputs) {
-		const existing = await readFileOrEmpty(outputsPath);
-		// First add base outputs, then add live outputs
-		let updated = appendOutputs(existing);
-		updated = appendLiveOutputs(updated);
-		if (updated !== existing) {
-			await writeFile(outputsPath, updated, result, true);
+	for (const file of rootFiles) {
+		const filePath = join(tfDir, file.name);
+		if (!existsSync(filePath)) {
+			await writeFile(filePath, file.content, result, false);
 		} else {
-			result.skipped.push(outputsPath);
+			result.skipped.push(filePath);
 		}
-	} else {
-		// Create new outputs.tf with both base and live outputs
-		const baseOutputs = tfTemplates.outputs;
-		const fullOutputs = appendLiveOutputs(baseOutputs);
-		await writeFile(outputsPath, fullOutputs, result, false);
-	}
-
-	// live.tf - Live mode AppSync resources
-	const livePath = join(tfDir, "live.tf");
-	if (existsSync(livePath)) {
-		const existing = await readFileOrEmpty(livePath);
-		if (!hasAppSyncApi(existing)) {
-			// Append live resources if AppSync API not found
-			await writeFile(livePath, existing + "\n" + tfLiveTemplates.live, result, true);
-		} else {
-			result.skipped.push(livePath);
-		}
-	} else {
-		await writeFile(livePath, tfLiveTemplates.live, result, false);
 	}
 }
 
@@ -252,7 +218,7 @@ export async function installDependencies(
 	const addCmd = packageManager === "npm" ? "install" : "add";
 	const devFlag = packageManager === "npm" ? "--save-dev" : "-D";
 
-	ui.info("Installing dependencies...");
+	logger.info("Installing dependencies...");
 
 	// Install main dependencies
 	const addProc = spawn([packageManager, addCmd, ...deps], {
@@ -280,7 +246,7 @@ export async function installDependencies(
 		throw new Error(`Failed to install dev dependencies: ${stderr}`);
 	}
 
-	ui.success("Dependencies installed");
+	logger.success("Dependencies installed");
 }
 
 /**
@@ -294,14 +260,14 @@ export function getRelativePath(cwd: string, fullPath: string): string {
  * Print scaffold results
  */
 export function printResults(cwd: string, result: ScaffoldResult): void {
-	ui.blank();
+	printBlank();
 
 	for (const path of result.created) {
-		ui.success(`Created ${getRelativePath(cwd, path)}`);
+		logger.success(`Created ${getRelativePath(cwd, path)}`);
 	}
 
 	for (const path of result.updated) {
-		ui.success(`Updated ${getRelativePath(cwd, path)}`);
+		logger.success(`Updated ${getRelativePath(cwd, path)}`);
 	}
 
 	// Don't print skipped files - too noisy

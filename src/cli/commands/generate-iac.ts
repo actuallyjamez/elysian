@@ -6,10 +6,20 @@ import { defineCommand } from "citty";
 import { readdirSync, existsSync, mkdirSync } from "fs";
 import { join } from "path";
 import { loadConfig } from "../../core/config";
-import { generateManifest, writeManifest } from "../../core/manifest";
+import { generateManifestLegacy, writeManifest } from "../../core/manifest";
 import { writeTerraformVars } from "../../core/terraform";
 import { getOriginalLambdaName } from "../../core/naming";
-import { ui, pc, formatDuration } from "../ui";
+import {
+	logger,
+	printHeader,
+	printSection,
+	printDivider,
+	printBlank,
+	printLambda,
+	printRoute,
+	printKeyValue,
+	formatDuration,
+} from "../logger";
 
 export const generateIacCommand = defineCommand({
 	meta: {
@@ -20,14 +30,14 @@ export const generateIacCommand = defineCommand({
 	async run() {
 		const startTime = Date.now();
 
-		ui.header();
+		printHeader();
 
 		// Load config
 		let config;
 		try {
 			config = await loadConfig();
 		} catch (error) {
-			ui.error(error instanceof Error ? error.message : String(error));
+			logger.error(error instanceof Error ? error.message : String(error));
 			process.exit(1);
 		}
 
@@ -37,8 +47,8 @@ export const generateIacCommand = defineCommand({
 
 		// Check that build output exists
 		if (!existsSync(outputDir)) {
-			ui.error(`Build output directory not found: ${outputDir}`);
-			ui.info("Run 'elysian build' first");
+			logger.error(`Build output directory not found: ${outputDir}`);
+			logger.info("Run 'elysian build' first");
 			process.exit(1);
 		}
 
@@ -51,8 +61,8 @@ export const generateIacCommand = defineCommand({
 		);
 
 		if (jsFiles.length === 0) {
-			ui.error(`No built lambda files found in ${outputDir}`);
-			ui.info("Run 'elysian build' first");
+			logger.error(`No built lambda files found in ${outputDir}`);
+			logger.info("Run 'elysian build' first");
 			process.exit(1);
 		}
 
@@ -64,30 +74,30 @@ export const generateIacCommand = defineCommand({
 			return `${originalName}.ts`;
 		});
 
-		ui.success(`Found ${lambdaFiles.length} built lambda${lambdaFiles.length === 1 ? "" : "s"}`);
+		logger.success(`Found ${lambdaFiles.length} built lambda${lambdaFiles.length === 1 ? "" : "s"}`);
 
 		// Generate manifest
-		ui.info("Generating route manifest...");
+		logger.info("Generating route manifest...");
 
 		try {
-			const manifest = await generateManifest(
+			const manifest = await generateManifestLegacy(
 				lambdaFiles,
 				outputDir,
-				config.openapi.enabled,
+				config.api.openapi.enabled,
 				name,
 			);
 
 			// Write JSON manifest
 			const manifestPath = join(outputDir, "manifest.json");
 			await writeManifest(manifest, manifestPath);
-			ui.success("Generated manifest.json");
+			logger.success("Generated manifest.json");
 
 			// Write Terraform variables
 			await writeTerraformVars(manifest, config);
-			ui.success(`Generated ${config.terraform.tfvarsFilename}`);
+			logger.success(`Generated ${config.terraform.tfvarsFilename}`);
 
 			// Route table
-			ui.section("Routes");
+			printSection("Routes");
 
 			// Group routes by lambda
 			const routesByLambda = new Map<string, typeof manifest.routes>();
@@ -104,25 +114,25 @@ export const generateIacCommand = defineCommand({
 			const maxPathLen = Math.max(...manifest.routes.map((r) => r.path.length));
 
 			for (const [displayName, routes] of routesByLambda) {
-				ui.labeled(displayName);
+				printLambda(displayName);
 				for (const route of routes) {
-					ui.route(route.method, route.path, route.pathParameters, maxPathLen);
+					printRoute(route.method, route.path, route.pathParameters, maxPathLen);
 				}
-				ui.blank();
+				printBlank();
 			}
 
 			// Summary
-			ui.divider();
+			printDivider();
 
 			const duration = Date.now() - startTime;
-			ui.success(
-				`Generated infrastructure for ${pc.bold(String(manifest.lambdas.length))} lambdas (${manifest.routes.length} routes) in ${pc.bold(formatDuration(duration))}`,
+			logger.success(
+				`Generated infrastructure for \x1b[1m${manifest.lambdas.length}\x1b[0m lambdas (${manifest.routes.length} routes) in \x1b[1m${formatDuration(duration)}\x1b[0m`,
 			);
-			ui.blank();
-			ui.keyValue("Output", `${config.terraform.outputDir}/${config.terraform.tfvarsFilename}`);
-			ui.blank();
+			printBlank();
+			printKeyValue("Output", `${config.terraform.outputDir}/${config.terraform.tfvarsFilename}`);
+			printBlank();
 		} catch (error) {
-			ui.error(error instanceof Error ? error.message : String(error));
+			logger.error(error instanceof Error ? error.message : String(error));
 			process.exit(1);
 		}
 	},

@@ -15,12 +15,12 @@ export default defineConfig({
 }
 
 /**
- * Example lambda template
+ * Example API route template using defineRoutes()
  */
-export function exampleLambdaTemplate(): string {
-	return `import { createLambda, t } from "@actuallyjamez/elysian";
+export function exampleApiRouteTemplate(): string {
+	return `import { defineRoutes, t } from "@actuallyjamez/elysian";
 
-export default createLambda()
+export default defineRoutes()
 	.get("/", ({ query }) => {
 		return \`Hello, \${query.name ?? "Elysian"}!\`;
 	}, {
@@ -34,6 +34,32 @@ export default createLambda()
 		},
 	});
 `;
+}
+
+/**
+ * Example generic lambda template using defineLambda()
+ */
+export function exampleGenericLambdaTemplate(): string {
+	return `import { defineLambda } from "@actuallyjamez/elysian";
+
+export default defineLambda({
+	trigger: "sqs",
+	handler: async (event) => {
+		for (const record of event.Records) {
+			const body = JSON.parse(record.body);
+			console.log("Processing message:", body);
+			// Add your processing logic here
+		}
+	},
+});
+`;
+}
+
+/**
+ * @deprecated Use exampleApiRouteTemplate instead
+ */
+export function exampleLambdaTemplate(): string {
+	return exampleApiRouteTemplate();
 }
 
 /**
