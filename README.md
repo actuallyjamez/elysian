@@ -2,15 +2,19 @@
 
 > Automatic Lambda bundler for [Elysia](https://elysiajs.com/) with AWS API Gateway and Terraform integration.
 
+Elysian simplifies deploying Elysia.js applications to AWS Lambda by automatically generating handlers, bundling code, and creating infrastructure. Focus on writing your application logic while elysian handles the deployment complexity.
+
 ## Features
 
-- **Zero-config Lambda handlers** - Just export your Elysia routes as default, handlers are auto-generated
-- **Interactive init wizard** - Sets up fresh or existing projects with smart defaults
-- **Package manager detection** - Automatically detects bun/npm/pnpm/yarn from lockfiles
-- **Automatic OpenAPI aggregation** - All routes are aggregated into a single OpenAPI spec endpoint
-- **Smart Terraform integration** - Generates modular Terraform files that won't overwrite your existing config
+- **API Routes** - Define HTTP endpoints in `src/api/` using `defineRoutes()`
+- **Generic Lambdas** - Create event-driven functions in `src/functions/` using `defineLambda()`
 - **Type-safe configuration** - Full TypeScript support with `defineConfig()`
+- **Smart Terraform integration** - Generates modular infrastructure without overwriting your config
 - **Watch mode** - Fast rebuilds during development
+- **Multi-package manager support** - Automatically detects bun/npm/pnpm/yarn
+- **OpenAPI auto-aggregation** - Single Swagger UI endpoint for all routes
+
+---
 
 ## Installation
 
@@ -28,87 +32,414 @@ pnpm add elysia @actuallyjamez/elysian
 yarn add elysia @actuallyjamez/elysian
 ```
 
+---
+
 ## Quick Start
 
 ### 1. Initialize your project
 
 ```bash
-# Interactive wizard - prompts for everything you need
 elysian init
 ```
 
 The wizard will:
-- Ask where to create the project (default: current directory)
-- Detect your package manager automatically
-- Create all necessary files
-- Install dependencies (fresh projects only)
+- Detect your package manager from lockfiles
+- Create all necessary project files
+- Install dependencies (for fresh projects)
 
-**Fresh project example:**
-```
-? Where would you like to create your project? my-api
-✔ Created directory: my-api
+### 2. Define API routes
 
-ℹ Creating new elysian project: my-api
-
-? Package manager: bun
-✔ Created package.json
-✔ Created elysian.config.ts
-✔ Created src/lambdas/hello.ts
-✔ Created terraform/providers.tf
-...
-```
-
-**Existing project example:**
-```
-ℹ Adding elysian to: my-existing-app
-
-ℹ Detected package manager: bun
-? Install dependencies? Yes
-✔ Created elysian.config.ts
-✔ Updated terraform/variables.tf
-...
-```
-
-### 2. Write your lambdas
+Create files in `src/api/` using `defineRoutes()`:
 
 ```typescript
-// src/lambdas/users.ts
-import { createLambda, t } from "@actuallyjamez/elysian";
+// src/api/users.ts
+import { defineRoutes, t } from "@actuallyjamez/elysian";
 
-export default createLambda()
-  .get("/users", () => db.getUsers(), {
+export default defineRoutes()
+  .get("/", () => "Hello, Elysian!")
+  .get("/users", () => db.users.findMany(), {
     response: t.Array(t.Object({ id: t.String(), name: t.String() })),
-    detail: { summary: "List all users", tags: ["Users"] },
+    detail: { summary: "List users", tags: ["Users"] },
   })
-  .get("/users/:id", ({ params }) => db.getUser(params.id), {
+  .get("/users/:id", ({ params }) => db.users.findUnique(params.id), {
     params: t.Object({ id: t.String() }),
     detail: { summary: "Get user by ID", tags: ["Users"] },
-  })
-  .post("/users", ({ body }) => db.createUser(body), {
-    body: t.Object({ name: t.String(), email: t.String() }),
-    detail: { summary: "Create user", tags: ["Users"] },
   });
 ```
 
-**That's it!** No need to export a handler - bundler wraps your default export automatically.
+### 3. Define Lambda functions
 
-### 3. Build
+Create files in `src/functions/` using `defineLambda()`:
 
-```bash
-# Development build
-elysian build
+```typescript
+// src/functions/process-queue.ts
+import { defineLambda } from "@actuallyjamez/elysian";
 
-# Production build (minified)
-elysian build --prod
+export default defineLambda({
+  trigger: "sqs",
+  handler: async (event) => {
+    for (const record of event.Records) {
+      const body = JSON.parse(record.body);
+      console.log("Processing:", body);
+    }
+  },
+});
 ```
 
-### 4. Deploy
+### 4. Build and deploy
 
 ```bash
+# Build all lambdas
+elysian build
+
+# Deploy infrastructure
 cd terraform
 terraform init
 terraform apply
 ```
+
+---
+
+## API Routes (`defineRoutes`)
+
+Define HTTP API endpoints in `src/api/` directory. Each file becomes a separate Lambda function with its own API Gateway endpoint.
+
+Since `defineRoutes()` returns an Elysia instance, you have full access to the entire Elysia ecosystem including plugins, state, decorators, hooks, and more.
+
+### Basic Usage
+
+```typescript
+import { defineRoutes, t } from "@actuallyjamez/elysian";
+
+export default defineRoutes()
+  .get("/hello", () => "Hello World!")
+  .post("/users", ({ body }) => db.createUser(body), {
+    body: t.Object({ name: t.String(), email: t.String() }),
+  });
+```
+
+### Route Methods
+
+All standard HTTP methods are supported:
+
+```typescript
+export default defineRoutes()
+  .get("/items", () => db.items.findMany())
+  .post("/items", ({ body }) => db.items.create(body))
+  .put("/items/:id", ({ params, body }) => db.items.update(params.id, body))
+  .patch("/items/:id", ({ params, body }) => db.items.update(params.id, body))
+  .delete("/items/:id", ({ params }) => db.items.delete(params.id))
+```
+
+### Request Types
+
+Define typed request parameters using Elysia's `t` utility:
+
+```typescript
+import { defineRoutes, t } from "@actuallyjamez/elysian";
+
+export default defineRoutes()
+  // Path parameters
+  .get("/users/:id", ({ params }) => {
+    return db.users.findUnique(params.id);
+  }, {
+    params: t.Object({ id: t.String() }),
+  })
+
+  // Query parameters
+  .get("/search", ({ query }) => {
+    return db.items.findMany({ where: { name: { contains: query.q } } });
+  }, {
+    query: t.Object({ q: t.String() }),
+  })
+
+  // Request body
+  .post("/users", ({ body }) => {
+    return db.users.create(body);
+  }, {
+    body: t.Object({
+      name: t.String(),
+      email: t.String(),
+      age: t.Optional(t.Number()),
+    }),
+  })
+
+  // Headers
+  .get("/secure", ({ headers }) => {
+    return { token: headers.authorization };
+  }, {
+    headers: t.Object({
+      authorization: t.String(),
+    }),
+  });
+```
+
+### Response Types
+
+Define response schemas for OpenAPI documentation:
+
+```typescript
+export default defineRoutes()
+  .get("/users", () => {
+    return db.users.findMany();
+  }, {
+    response: t.Array(t.Object({
+      id: t.String(),
+      name: t.String(),
+      email: t.String(),
+    })),
+    detail: {
+      summary: "List all users",
+      description: "Returns an array of user objects",
+      tags: ["Users"],
+    },
+  });
+```
+
+### OpenAPI Metadata
+
+Add OpenAPI documentation to routes:
+
+```typescript
+export default defineRoutes()
+  .get("/users", () => db.users.findMany(), {
+    detail: {
+      summary: "List users",
+      description: "Retrieve a list of all users in the system",
+      tags: ["Users"],
+      operationId: "listUsers",
+      deprecated: false,
+    },
+  })
+  .get("/users/:id", ({ params }) => db.users.findUnique(params.id), {
+    params: t.Object({ id: t.String() }),
+    detail: {
+      summary: "Get user",
+      tags: ["Users"],
+    },
+  });
+```
+
+### Accessing the Elysia App
+
+Since `defineRoutes()` returns an Elysia instance, you can use all Elysia features directly:
+
+```typescript
+import { defineRoutes, t } from "@actuallyjamez/elysian";
+import { cors } from "@elysiajs/cors";
+import { jwt } from "@elysiajs/jwt";
+import { cookie } from "@elysiajs/cookie";
+
+export default defineRoutes()
+  .use(cors())
+  .use(jwt({ secret: "your-secret" }))
+  .use(cookie())
+  .derive(({ jwt, cookie: { auth } }) => {
+    return {
+      verify: () => jwt.verify(auth.value),
+    };
+  })
+  .get("/profile", ({ verify }) => {
+    const user = verify();
+    return user ?? { error: "Unauthorized" };
+  })
+  .post("/login", ({ cookie, jwt, body }) => {
+    const user = db.users.findUnique(body.email);
+    if (!user) return { error: "Invalid credentials" };
+    
+    const token = jwt.sign({ id: user.id, email: user.email });
+    cookie.auth.set({ value: token, httpOnly: true });
+    return { success: true };
+  });
+```
+
+You can use any Elysia plugins, including:
+- [@elysiajs/cors](https://elysiajs.com/plugins/cors.html) - CORS headers
+- [@elysiajs/jwt](https://elysiajs.com/plugins/jwt.html) - JWT authentication
+- [@elysiajs/cookie](https://elysiajs.com/plugins/cookie.html) - Cookie handling
+- [@elysiajs/html](https://elysiajs.com/plugins/html.html) - HTML responses
+- [@elysiajs/static](https://elysiajs.com/plugins/static.html) - Static file serving
+- And any other Elysia-compatible plugins
+
+### Decorators and State
+
+```typescript
+import { defineRoutes, t } from "@actuallyjamez/elysian";
+
+export default defineRoutes()
+  .decorate("db", database)
+  .state("version", "1.0.0")
+  .get("/version", ({ store }) => store.version)
+  .get("/db-health", ({ db }) => db.ping());
+```
+
+### Error Handling
+
+```typescript
+import { defineRoutes, t } from "@actuallyjamez/elysian";
+
+export default defineRoutes()
+  .error(({ error }) => {
+    return new Response(error.toString(), { status: 500 });
+  })
+  .get("/users/:id", ({ params }) => {
+    const user = db.users.findUnique(params.id);
+    if (!user) {
+      throw new Error("User not found");
+    }
+    return user;
+  });
+```
+
+---
+
+## Generic Lambdas (`defineLambda`)
+
+Define event-driven Lambda functions in `src/functions/` directory. These are separate from API routes and can be triggered by various AWS events.
+
+### Supported Triggers
+
+#### SQS (Simple Queue Service)
+
+```typescript
+import { defineLambda } from "@actuallyjamez/elysian";
+
+export default defineLambda({
+  trigger: "sqs",
+  handler: async (event) => {
+    for (const record of event.Records) {
+      const body = JSON.parse(record.body);
+      console.log("Processing message:", body);
+    }
+  },
+});
+```
+
+With auto-created queue configuration:
+
+```typescript
+export default defineLambda({
+  trigger: {
+    type: "sqs",
+    batchSize: 10,
+    visibilityTimeout: 60,
+    messageRetentionSeconds: 86400,
+    fifo: true,
+    contentBasedDeduplication: true,
+  },
+  handler: async (event) => {
+    for (const record of event.Records) {
+      console.log("Processing:", record.body);
+    }
+  },
+});
+```
+
+#### Schedule (EventBridge)
+
+```typescript
+import { defineLambda } from "@actuallyjamez/elysian";
+
+export default defineLambda({
+  trigger: {
+    type: "schedule",
+    every: "1 day",  // "6 hours", "30 minutes", "1h", "30m"
+  },
+  handler: async (event) => {
+    console.log("Running daily cleanup...");
+  },
+});
+```
+
+#### S3 (Simple Storage Service)
+
+```typescript
+import { defineLambda } from "@actuallyjamez/elysian";
+
+export default defineLambda({
+  trigger: {
+    type: "s3",
+    events: ["s3:ObjectCreated:*", "s3:ObjectDeleted:*"],
+    prefix: "uploads/",
+    suffix: ".jpg",
+  },
+  handler: async (event) => {
+    for (const record of event.Records) {
+      console.log("Bucket:", record.s3.bucket.name);
+      console.log("Key:", record.s3.object.key);
+    }
+  },
+});
+```
+
+#### SNS (Simple Notification Service)
+
+```typescript
+import { defineLambda } from "@actuallyjamez/elysian";
+
+export default defineLambda({
+  trigger: {
+    type: "sns",
+    filterPolicy: {
+      severity: ["high", "critical"],
+    },
+  },
+  handler: async (event) => {
+    for (const record of event.Records) {
+      const message = JSON.parse(record.Sns.Message);
+      console.log("Alert:", message);
+    }
+  },
+});
+```
+
+#### Kinesis
+
+```typescript
+import { defineLambda } from "@actuallyjamez/elysian";
+
+export default defineLambda({
+  trigger: {
+    type: "kinesis",
+    batchSize: 100,
+    startingPosition: "LATEST",
+    shardCount: 2,
+    retentionPeriodHours: 24,
+  },
+  handler: async (event) => {
+    for (const record of event.Records) {
+      const data = Buffer.from(record.kinesis.data, "base64");
+      console.log("Record:", data.toString());
+    }
+  },
+});
+```
+
+#### Manual/No Trigger
+
+```typescript
+import { defineLambda } from "@actuallyjamez/elysian";
+
+export default defineLambda({
+  handler: async (event) => {
+    return { success: true, timestamp: Date.now() };
+  },
+});
+```
+
+### Event Types
+
+Each trigger type provides the correct event type:
+
+| Trigger | Event Type |
+|---------|------------|
+| `sqs` | `SQSEvent` |
+| `schedule` | `ScheduledEvent` |
+| `s3` | `S3Event` |
+| `sns` | `SNSEvent` |
+| `kinesis` | `KinesisStreamEvent` |
+
+---
 
 ## Configuration
 
@@ -118,79 +449,101 @@ Create `elysian.config.ts` in your project root:
 import { defineConfig } from "@actuallyjamez/elysian";
 
 export default defineConfig({
-  // Required: Used for naming your AWS resources
   name: "my-api",
-
-  // Optional: Lambda source directory (default: "src/lambdas")
-  lambdasDir: "src/lambdas",
-
-  // Optional: Build output directory (default: "dist")
   outputDir: "dist",
-
-  // Optional: OpenAPI configuration (default: enabled)
-  // Note: title and version have smart defaults
-  openapi: {
-    enabled: true,
-    // title defaults to `name` if not provided
-    // version defaults to package.json version if not provided
-    description: "API description",
+  api: {
+    dir: "src/api",
+    openapi: {
+      enabled: true,
+      title: "My API",
+      version: "1.0.0",
+      description: "API description",
+    },
   },
-
-  // Optional: Terraform output directory (default: "terraform")
-  terraform: {
-    outputDir: "terraform",
+  functions: {
+    dir: "src/functions",
   },
-
-  // Optional: Lambda defaults
+  build: {
+    minify: true,
+    sourcemap: false,
+    external: ["@aws-sdk/*"],
+  },
   lambda: {
     runtime: "nodejs22.x",
     memorySize: 256,
     timeout: 30,
   },
+  terraform: {
+    outputDir: "terraform",
+    tfvarsFilename: "api-routes.auto.tfvars",
+    functionsTfvarsFilename: "functions.auto.tfvars",
+  },
 });
 ```
+
+### Configuration Options
+
+| Property | Type | Default | Description |
+|----------|------|---------|-------------|
+| `name` | `string` | - | **Required.** Used for resource naming |
+| `outputDir` | `string` | `"dist"` | Build output directory |
+| `api.dir` | `string` | `"src/api"` | API routes directory |
+| `api.openapi.enabled` | `boolean` | `true` | Enable OpenAPI aggregation |
+| `api.openapi.title` | `string` | config name | OpenAPI spec title |
+| `api.openapi.version` | `string` | package.json version | OpenAPI spec version |
+| `api.openapi.description` | `string` | `""` | OpenAPI spec description |
+| `functions.dir` | `string` | `"src/functions"` | Functions directory |
+| `build.minify` | `boolean` | `true` in prod | Minify output |
+| `build.sourcemap` | `boolean` | `true` in dev | Generate sourcemaps |
+| `build.external` | `string[]` | `["@aws-sdk/*"]` | Packages to exclude from bundle |
+| `lambda.runtime` | `string` | `"nodejs22.x"` | Lambda runtime |
+| `lambda.memorySize` | `number` | `256` | Memory in MB |
+| `lambda.timeout` | `number` | `30` | Timeout in seconds |
+| `terraform.outputDir` | `string` | `"terraform"` | Terraform output directory |
+
+---
 
 ## CLI Commands
 
 ### `elysian init`
 
-Interactive wizard to initialize a new elysian project.
+Initialize a new or existing elysian project.
 
 ```bash
-# Initialize in current directory
+# Interactive wizard
 elysian init
 
-# Initialize in subdirectory (creates it if needed)
-elysian init
-# Answer: my-new-api
+# Initialize in current directory
+elysian init .
+
+# Initialize in subdirectory
+elysian init my-api
 
 # Force overwrite existing files
 elysian init --force
 ```
 
-**What it creates (fresh project):**
+**Creates for fresh projects:**
 - `package.json` - With build scripts
 - `tsconfig.json` - TypeScript configuration
 - `.gitignore` - Ignores node_modules, dist, terraform state
 - `elysian.config.ts` - Elysian configuration
-- `src/lambdas/hello.ts` - Example lambda
-- `terraform/providers.tf` - AWS provider configuration
-- `terraform/variables.tf` - Terraform variables
-- `terraform/main.tf` - Lambda and API Gateway resources
-- `terraform/outputs.tf` - API endpoint output
+- `src/api/hello.ts` - Example API route
+- `src/functions/process-queue.ts` - Example function
+- `terraform/` - AWS provider, variables, main, outputs
 
-**What it does (existing project):**
+**For existing projects:**
 - Detects package manager from lockfiles
-- Creates `elysian.config.ts` (doesn't overwrite if exists)
-- Creates example lambda only if no `.ts` files in `src/lambdas/`
-- Smart-appends to existing Terraform files (won't overwrite your config)
+- Creates `elysian.config.ts` (won't overwrite)
+- Adds example files only if directories are empty
+- Appends to existing Terraform files (won't overwrite)
 
 ### `elysian build`
 
 Build all lambdas for deployment.
 
 ```bash
-# Development build
+# Development build (with sourcemaps)
 elysian build
 
 # Production build (minified, no sourcemaps)
@@ -200,11 +553,13 @@ elysian build --prod
 **Output:**
 - `dist/*.js` - Bundled lambda code
 - `dist/*.zip` - Lambda deployment packages
-- `dist/manifest.json` - Route manifest (for debugging)
+- `dist/manifest.json` - Route manifest
+- `terraform/api-routes.auto.tfvars` - API route configuration
+- `terraform/functions.auto.tfvars` - Function configuration
 
 ### `elysian dev`
 
-Watch mode for development - rebuilds on file changes.
+Watch mode for development with LocalStack integration.
 
 ```bash
 # Watch with packaging
@@ -212,6 +567,9 @@ elysian dev
 
 # Watch without zip creation (faster)
 elysian dev --no-package
+
+# Skip LocalStack health check
+elysian dev --no-localstack
 ```
 
 ### `elysian generate-iac`
@@ -222,62 +580,7 @@ Regenerate Terraform files without rebuilding lambdas.
 elysian generate-iac
 ```
 
-**Smart Terraform file handling:**
-- `providers.tf` - Adds AWS provider if missing
-- `variables.tf` - Adds missing variables only
-- `main.tf` - Adds Lambda/API Gateway resources if missing
-- `outputs.tf` - Adds API endpoint output if missing
-
-## How It Works
-
-### 1. Route Discovery
-
-The bundler scans your `lambdasDir` for `.ts` files. Each file becomes a separate Lambda function.
-
-```
-src/lambdas/
-├── users.ts    → users.zip → AWS Lambda (users-api)
-├── posts.ts    → posts.zip → AWS Lambda (posts-api)
-└── auth.ts     → auth.zip  → AWS Lambda (auth-api)
-```
-
-### 2. Handler Injection
-
-When you export an Elysia app as default:
-
-```typescript
-export default createLambda().get("/hello", () => "Hello!");
-```
-
-The bundler automatically wraps it with a Lambda handler:
-
-```typescript
-import { Hono } from "hono/tiny";
-import { handle } from "hono/aws-lambda";
-
-const app = /* your exported app */;
-export const handler = handle(new Hono().mount("/", app.fetch));
-```
-
-### 3. OpenAPI Aggregation
-
-An `__openapi__` lambda is automatically generated that imports all your routes and exposes:
-- `GET /openapi` - Swagger UI
-- `GET /openapi/json` - OpenAPI JSON spec
-
-### 4. Terraform Integration
-
-The generated Terraform files are modular and won't overwrite your existing configuration:
-
-- **providers.tf** - AWS provider with version `~> 6.0`
-- **variables.tf** - All variables (region, lambda config, routes)
-- **main.tf** - API Gateway, Lambda, IAM resources
-- **outputs.tf** - API endpoint URL
-
-The `terraform/api-routes.auto.tfvars` file is auto-generated on each build with:
-- List of Lambda names
-- Route-to-Lambda mappings (with API Gateway path format)
-- Lambda configuration defaults
+---
 
 ## Project Structure
 
@@ -288,30 +591,100 @@ my-api/
 ├── tsconfig.json            # TypeScript config
 ├── .gitignore               # Git ignore patterns
 ├── src/
-│   └── lambdas/
-│       ├── users.ts          # → my-api-users.zip Lambda
-│       ├── posts.ts          # → my-api-posts.zip Lambda
-│       └── auth.ts           # → my-api-auth.zip Lambda
+│   ├── api/                  # HTTP API routes (src/api/)
+│   │   ├── users.ts          # → my-api-users Lambda
+│   │   └── posts.ts          # → my-api-posts Lambda
+│   └── functions/            # Generic Lambda functions (src/functions/)
+│       ├── process-queue.ts  # → SQS Lambda
+│       └── daily-cleanup.ts  # → Scheduled Lambda
 ├── dist/                    # Build output
 │   ├── my-api-users.js
 │   ├── my-api-users.zip
 │   ├── my-api-posts.js
 │   ├── my-api-posts.zip
-│   ├── __openapi__.js       # Auto-generated
+│   ├── my-api-process-queue.js
+│   ├── my-api-process-queue.zip
+│   ├── __openapi__.js       # Auto-generated OpenAPI
 │   ├── __openapi__.zip
 │   └── manifest.json
 └── terraform/
     ├── providers.tf          # AWS provider
     ├── variables.tf         # Terraform variables
-    ├── main.tf             # Resources (Lambda, API Gateway, IAM)
-    ├── outputs.tf          # Outputs
-    └── api-routes.auto.tfvars  # Auto-generated on build
+    ├── main.tf             # Lambda & API Gateway resources
+    ├── outputs.tf          # API endpoint URL
+    ├── api-routes.auto.tfvars  # Auto-generated API routes
+    └── functions.auto.tfvars   # Auto-generated functions
 ```
+
+---
+
+## How It Works
+
+### 1. Route Discovery
+
+The bundler scans `src/api/` for `.ts` files. Each file becomes a separate Lambda function with its own API Gateway endpoint.
+
+```
+src/api/
+├── users.ts    → users.zip → AWS Lambda (my-api-users)
+├── posts.ts    → posts.zip → AWS Lambda (my-api-posts)
+└── auth.ts     → auth.zip  → AWS Lambda (my-api-auth)
+```
+
+### 2. Function Discovery
+
+The bundler scans `src/functions/` for `.ts` files. Each file becomes a separate Lambda triggered by the specified event source.
+
+```
+src/functions/
+├── process-queue.ts  → SQS Lambda (my-api-process-queue)
+├── daily-cleanup.ts  → Scheduled Lambda (my-api-daily-cleanup)
+```
+
+### 3. Handler Injection
+
+When you export a `defineRoutes()` result as default:
+
+```typescript
+// src/api/users.ts
+export default defineRoutes().get("/users", () => db.getUsers());
+```
+
+The bundler automatically wraps it with a Lambda handler:
+
+```typescript
+import { createHandler } from "@actuallyjamez/elysian/runtime";
+
+const app = defineRoutes().get("/users", () => db.getUsers());
+export const handler = createHandler(app);
+```
+
+### 4. OpenAPI Aggregation
+
+An `__openapi__` lambda is automatically generated that imports all routes and exposes:
+- `GET /` - Swagger UI
+- `GET /openapi/json` - OpenAPI JSON spec
+
+### 5. Terraform Generation
+
+Terraform files are generated with smart merging:
+- `providers.tf` - AWS provider with version `~> 6.0`
+- `variables.tf` - All variables (region, routes, functions)
+- `main.tf` - API Gateway, Lambda, IAM resources
+- `outputs.tf` - API endpoint URL
+- `api-routes.auto.tfvars` - Route-to-Lambda mappings
+- `functions.auto.tfvars` - Function trigger configurations
+
+---
 
 ## Requirements
 
-- [Bun](https://bun.sh/) runtime
+- [Bun](https://bun.sh/) runtime v1.0+
 - [Elysia](https://elysiajs.com/) v1.0+
+- Node.js 18+ (for Lambda runtime)
+- AWS account with appropriate permissions
+
+---
 
 ## License
 
