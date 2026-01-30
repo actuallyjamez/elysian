@@ -1,5 +1,11 @@
 # @actuallyjamez/elysian
 
+## 0.12.1
+
+### Patch Changes
+
+- [`a394aeb`](https://github.com/actuallyjamez/elysian/commit/a394aeb00a7a0c6c6dc94c3f785ed3948a04526b) Thanks [@github-actions[bot]](https://github.com/github-actions%5Bbot%5D)! - remove package-lock.json
+
 ## 0.12.0
 
 ### Minor Changes
