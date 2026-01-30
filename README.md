@@ -2,7 +2,7 @@
 
 > Automatic Lambda bundler for [Elysia](https://elysiajs.com/) with AWS API Gateway and Terraform integration.
 
-Elysian simplifies deploying Elysia.js applications to AWS Lambda. Write your application logic while elysian handles bundling, handlers, and infrastructure. Each file in `src/api/` becomes a separate Lambda with its own API Gateway endpoint.
+Elysian simplifies deploying Elysia.js applications to AWS Lambda. Write your application logic while elysian handles bundling, handlers, and infrastructure. Each file in `src/api/` becomes a separate Lambda, with all routes in that file mapped to API Gateway endpoints.
 
 ```bash
 bunx @actuallyjamez/elysian init
@@ -55,7 +55,7 @@ After initialization, start the dev server to see changes live:
 bun run dev
 ```
 
-Define API routes in `src/api/` using `defineRoutes()`. Each file becomes a separate Lambda with its own API endpoint.
+Define API routes in `src/api/` using `defineRoutes()`. All routes in a file share the same Lambda, mapped to different API Gateway endpoints.
 
 ```typescript
 // src/api/users.ts
@@ -426,9 +426,9 @@ my-api/
 ├── tsconfig.json            # TypeScript config
 ├── .gitignore               # Git ignore patterns
 ├── src/
-│   ├── api/                  # HTTP routes → Lambda + API Gateway
-│   │   ├── users.ts          # → my-api-users
-│   │   └── posts.ts          # → my-api-posts
+│   ├── api/                  # Files → Lambda, routes mapped to API Gateway
+│   │   ├── users.ts          # Routes: /users, /users/:id → my-api-users Lambda
+│   │   └── posts.ts          # Routes: /posts, /posts/:id → my-api-posts Lambda
 │   └── functions/            # Event-driven functions
 │       ├── process-queue.ts  # → my-api-process-queue (SQS)
 │       └── daily-cleanup.ts  # → my-api-daily-cleanup (Schedule)
@@ -453,7 +453,7 @@ my-api/
 
 1. **Discovery** - Scans `src/api/` and `src/functions/` for `.ts` files
 2. **Bundling** - Packages each file into a standalone Lambda bundle
-3. **Wrapping** - Injects Lambda handlers that bridge Elysia to API Gateway
+3. **Route Mapping** - All routes in a file share the same Lambda, mapped to API Gateway
 4. **OpenAPI** - Aggregates all route schemas into a single spec endpoint
 5. **Infrastructure** - Generates modular Terraform for AWS resources
 
