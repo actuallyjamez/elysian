@@ -143,8 +143,8 @@ const baseOptions: SignaleOptions = {
 		displayBadge: true,
 		displayDate: false,
 		displayFilename: false,
-		displayLabel: false,
-		displayTimestamp: true,
+		displayLabel: true,
+		displayTimestamp: false,
 		underlineLabel: false,
 		underlineMessage: false,
 		uppercaseLabel: false,
@@ -175,6 +175,7 @@ function createLogger(): ElysianLogger {
 
 /**
  * Create an interactive logger for spinners/progress
+ * @deprecated Use createStatusLine() for reliable single-line updates
  */
 export function createInteractiveLogger(scope?: string): ElysianLogger {
 	return new Signale({
@@ -182,6 +183,63 @@ export function createInteractiveLogger(scope?: string): ElysianLogger {
 		interactive: true,
 		scope,
 	}) as ElysianLogger;
+}
+
+/**
+ * Simple status line that overwrites itself
+ * More reliable than Signale's interactive mode
+ */
+export class StatusLine {
+	private lastLength = 0;
+	private isActive = false;
+
+	/** Update the status line with a new message */
+	update(message: string): void {
+		if (!process.stdout.isTTY) {
+			// Non-TTY: just print each message on its own line
+			console.log(`${cyanColor}…${resetColor}  ${cyanColor}awaiting${resetColor}  ${message}`);
+			return;
+		}
+
+		// Clear the previous line and write new content
+		const clearStr = this.isActive ? `\r${' '.repeat(this.lastLength)}\r` : '';
+		const output = `${cyanColor}…${resetColor}  ${cyanColor}awaiting${resetColor}  ${message}`;
+		process.stdout.write(`${clearStr}${output}`);
+		// Account for ANSI codes in length calculation
+		const visibleLength = `…  awaiting  ${message}`.length;
+		this.lastLength = visibleLength;
+		this.isActive = true;
+	}
+
+	/** Complete with success */
+	success(message: string): void {
+		this.finish(`${greenColor}✔${resetColor}  ${greenColor}success${resetColor}   ${message}`);
+	}
+
+	/** Complete with error */
+	error(message: string): void {
+		this.finish(`${redColor}✖${resetColor}  ${redColor}error${resetColor}     ${message}`);
+	}
+
+	/** Finish and print final line */
+	private finish(output: string): void {
+		if (!process.stdout.isTTY) {
+			console.log(output);
+			return;
+		}
+
+		const clearStr = this.isActive ? `\r${' '.repeat(this.lastLength)}\r` : '';
+		process.stdout.write(`${clearStr}${output}\n`);
+		this.isActive = false;
+		this.lastLength = 0;
+	}
+}
+
+/**
+ * Create a new status line for progress updates
+ */
+export function createStatusLine(): StatusLine {
+	return new StatusLine();
 }
 
 /**
@@ -247,6 +305,14 @@ export class Task {
 		this.interactive.error(message || this.message);
 		return duration;
 	}
+
+	/** Complete silently without logging (clears the spinner line) */
+	complete(): number {
+		const duration = Date.now() - this.startTime;
+		// Clear the interactive line by printing empty - this effectively hides the spinner
+		this.interactive.log("");
+		return duration;
+	}
 }
 
 /**
@@ -291,6 +357,8 @@ export interface InvocationContext {
 	path?: string;
 	queueName?: string;
 	eventSource?: string;
+	/** Schedule interval for scheduled triggers (e.g., "1m", "1h") */
+	scheduleInterval?: string;
 	startTime: number;
 }
 
@@ -355,9 +423,17 @@ export function detectTrigger(event: unknown): {
 
 	// Scheduled events (check before generic EventBridge)
 	if (e.source === "aws.events" && e["detail-type"] === "Scheduled Event") {
+		// Extract rule name from resources ARN if available
+		// Format: arn:aws:events:region:account:rule/rule-name
+		const resources = e.resources as string[] | undefined;
+		let ruleName = "";
+		if (resources && resources.length > 0) {
+			const arnParts = resources[0].split("/");
+			ruleName = arnParts[arnParts.length - 1] || "";
+		}
 		return {
 			trigger: "Schedule",
-			details: "",
+			details: ruleName,
 		};
 	}
 
@@ -397,6 +473,18 @@ const cyanColor = "\x1b[36m";
 const greenColor = "\x1b[32m";
 const redColor = "\x1b[31m";
 const yellowColor = "\x1b[33m";
+const underlineColor = "\x1b[4m";
+
+/**
+ * Format a URL as a clickable hyperlink using OSC 8 escape sequence
+ * Falls back to just the URL for terminals that don't support it
+ */
+export function formatLink(url: string, text?: string): string {
+	const displayText = text || url;
+	// OSC 8 hyperlink format: \e]8;;URL\a TEXT \e]8;;\a
+	// Using \x1b for ESC and \x07 for BEL (more compatible than ST)
+	return `\x1b]8;;${url}\x07${cyanColor}${underlineColor}${displayText}${resetColor}\x1b]8;;\x07`;
+}
 
 /**
  * Colorize an HTTP method
@@ -444,7 +532,7 @@ export class InvocationLogger {
 	 * Log the start of an invocation
 	 */
 	start(): void {
-		const { trigger, triggerDetails } = this.ctx;
+		const { trigger, triggerDetails, scheduleInterval } = this.ctx;
 
 		let triggerStr: string;
 		if (trigger === "HTTP" && this.ctx.method && this.ctx.path) {
@@ -452,7 +540,12 @@ export class InvocationLogger {
 		} else if (trigger === "SQS" && this.ctx.queueName) {
 			triggerStr = `sqs ${this.ctx.queueName}`;
 		} else if (trigger === "Schedule") {
-			triggerStr = "scheduled";
+			// Yellow for scheduled, grey for interval
+			if (scheduleInterval) {
+				triggerStr = `${yellowColor}scheduled${resetColor} ${dimColor}every ${scheduleInterval}${resetColor}`;
+			} else {
+				triggerStr = `${yellowColor}scheduled${resetColor}`;
+			}
 		} else if (triggerDetails) {
 			triggerStr = `${trigger.toLowerCase()} ${triggerDetails}`;
 		} else {
@@ -596,6 +689,326 @@ export function endInvocation(
 }
 
 // ============================================
+// Concurrent Log Manager
+// ============================================
+
+/**
+ * Buffered log entry
+ */
+export interface BufferedLog {
+	timestamp: number;
+	level: "log" | "warn" | "error" | "info" | "debug";
+	message: string;
+}
+
+/**
+ * Buffered invocation state
+ */
+interface BufferedInvocation {
+	ctx: InvocationContext;
+	logs: BufferedLog[];
+	startTime: number;
+	interactiveLogger: ElysianLogger | null;
+	scopedLogger: ElysianLogger;
+}
+
+/**
+ * Get the trigger string for display
+ */
+function getTriggerString(ctx: InvocationContext): string {
+	const { trigger, triggerDetails, scheduleInterval } = ctx;
+
+	if (trigger === "HTTP" && ctx.method && ctx.path) {
+		return `${colorMethod(ctx.method)} ${ctx.path}`;
+	} else if (trigger === "SQS" && ctx.queueName) {
+		return `sqs ${ctx.queueName}`;
+	} else if (trigger === "Schedule") {
+		// Yellow for scheduled, grey for interval
+		if (scheduleInterval) {
+			return `${yellowColor}scheduled${resetColor} ${dimColor}every ${scheduleInterval}${resetColor}`;
+		}
+		return `${yellowColor}scheduled${resetColor}`;
+	} else if (triggerDetails) {
+		return `${trigger.toLowerCase()} ${triggerDetails}`;
+	} else {
+		return trigger.toLowerCase();
+	}
+}
+
+/**
+ * ConcurrentLogManager handles display of multiple concurrent invocations
+ * using Signale's interactive mode for live updates.
+ *
+ * - Each active invocation uses an interactive Signale logger
+ * - Console logs are buffered and printed when the invocation completes
+ * - Log groups are separated by blank lines for readability
+ */
+export class ConcurrentLogManager {
+	private invocations: Map<string, BufferedInvocation> = new Map();
+	private isInteractive: boolean;
+	private maxLogLineLength: number = 50;
+
+	constructor() {
+		this.isInteractive = process.stdout.isTTY ?? false;
+	}
+
+	/**
+	 * Start tracking a new invocation
+	 */
+	start(
+		lambdaName: string,
+		requestId: string,
+		event: unknown,
+		appName?: string,
+		scheduleInterval?: string,
+	): void {
+		const { trigger, details } = detectTrigger(event);
+		const e = event as Record<string, unknown>;
+
+		const ctx: InvocationContext = {
+			lambdaName,
+			displayName: this.getDisplayName(lambdaName, appName),
+			requestId,
+			trigger,
+			triggerDetails: details,
+			scheduleInterval,
+			startTime: Date.now(),
+		};
+
+		// Extract HTTP context
+		if (trigger === "HTTP") {
+			const requestContext = e.requestContext as Record<string, unknown> | undefined;
+			const httpContext = requestContext?.http as Record<string, unknown> | undefined;
+			ctx.method = (e.httpMethod as string) || (httpContext?.method as string) || "?";
+			ctx.path = (e.rawPath || e.path || "/") as string;
+		} else if (trigger === "SQS") {
+			const records = e.Records as Array<Record<string, unknown>> | undefined;
+			const arnParts = (records?.[0]?.eventSourceARN as string)?.split(":")?.pop();
+			ctx.queueName = arnParts || undefined;
+		}
+
+		// Create scoped logger for this invocation
+		const scopedLogger = new Signale({
+			...baseOptions,
+			scope: ctx.displayName,
+		}) as ElysianLogger;
+
+		// Create interactive logger if TTY
+		const interactiveLogger = this.isInteractive
+			? new Signale({
+				...baseOptions,
+				interactive: true,
+				scope: ctx.displayName,
+			}) as ElysianLogger
+			: null;
+
+		this.invocations.set(requestId, {
+			ctx,
+			logs: [],
+			startTime: Date.now(),
+			interactiveLogger,
+			scopedLogger,
+		});
+
+		// Show invocation start with invoke marker (not pending)
+		const triggerStr = getTriggerString(ctx);
+		if (interactiveLogger) {
+			interactiveLogger.await(triggerStr);
+		} else {
+			// Non-interactive: show invoke immediately
+			scopedLogger.invoke(triggerStr);
+		}
+	}
+
+	/**
+	 * Add a log entry for an invocation
+	 */
+	log(
+		requestId: string,
+		level: BufferedLog["level"],
+		message: string,
+	): void {
+		const inv = this.invocations.get(requestId);
+		if (!inv) {
+			// Fallback for unknown invocations
+			logger.scope("unknown")[level === "error" ? "error" : level === "warn" ? "warn" : "log"](message);
+			return;
+		}
+
+		inv.logs.push({
+			timestamp: Date.now(),
+			level,
+			message,
+		});
+
+		// Update interactive display with latest log (show as awaiting/processing)
+		if (inv.interactiveLogger) {
+			const triggerStr = getTriggerString(inv.ctx);
+			const truncated = message.length > this.maxLogLineLength
+				? message.slice(0, this.maxLogLineLength - 3) + "..."
+				: message;
+			inv.interactiveLogger.await(`${triggerStr} ${dimColor}│${resetColor} ${truncated}`);
+		}
+	}
+
+	/**
+	 * End an invocation and print the grouped output
+	 * 
+	 * Output format:
+	 * [scope] › ▶  invoke    GET /users
+	 *   │ log message 1
+	 *   │ log message 2
+	 *   └─ ✔ complete  200 12ms
+	 */
+	end(
+		requestId: string,
+		statusCode?: number,
+		error?: string | Error,
+	): void {
+		const inv = this.invocations.get(requestId);
+		if (!inv) return;
+
+		this.invocations.delete(requestId);
+
+		const triggerStr = getTriggerString(inv.ctx);
+		const duration = Date.now() - inv.startTime;
+		const durationStr = formatDuration(duration);
+
+		// Format status for HTTP responses
+		const statusStr = statusCode !== undefined
+			? `${statusCode >= 400 ? redColor : greenColor}${statusCode}${resetColor} `
+			: "";
+
+		// Indent to align with start of scope bracket
+		const treePadding = "";
+
+		if (inv.interactiveLogger) {
+			// Interactive mode: first show the invoke line
+			inv.interactiveLogger.invoke(triggerStr);
+			
+			// Print buffered logs with tree connector
+			for (const log of inv.logs) {
+				this.printLogWithTree(treePadding, log);
+			}
+			
+			// Print completion with tree end connector and duration
+			if (error) {
+				const errorMsg = error instanceof Error ? error.message : error;
+				this.printTreeEnd(treePadding, "error", `${errorMsg} ${dimColor}${durationStr}${resetColor}`);
+			} else {
+				this.printTreeEnd(treePadding, "complete", `${statusStr}${dimColor}${durationStr}${resetColor}`);
+			}
+		} else {
+			// Non-interactive: invoke was already printed at start
+			// Print buffered logs with tree connector
+			for (const log of inv.logs) {
+				this.printLogWithTree(treePadding, log);
+			}
+
+			// Print completion with tree end connector and duration
+			if (error) {
+				const errorMsg = error instanceof Error ? error.message : error;
+				this.printTreeEnd(treePadding, "error", `${errorMsg} ${dimColor}${durationStr}${resetColor}`);
+			} else {
+				this.printTreeEnd(treePadding, "complete", `${statusStr}${dimColor}${durationStr}${resetColor}`);
+			}
+		}
+		
+		console.log(); // Add spacing after log group
+	}
+
+	/**
+	 * Print a log line with tree connector (│)
+	 * No scope prefix - just padding and connector
+	 */
+	private printLogWithTree(padding: string, log: BufferedLog): void {
+		// Format:          │ message
+		console.log(`${padding} ${dimColor}│${resetColor} ${log.message}`);
+	}
+
+	/**
+	 * Print the tree end with completion status
+	 * No scope prefix - just padding and connector
+	 */
+	private printTreeEnd(padding: string, type: "complete" | "error", message: string): void {
+		const badge = type === "complete" ? `${greenColor}✔${resetColor}` : `${redColor}✖${resetColor}`;
+		const label = type === "complete" ? "complete" : "error";
+		const labelColor = type === "complete" ? greenColor : redColor;
+		
+		// Format:          └─ ✔ complete  200 12ms
+		console.log(`${padding} ${dimColor}└─${resetColor} ${badge} ${labelColor}${label}${resetColor}  ${message}`);
+	}
+
+	/**
+	 * Print a buffered log using Signale
+	 */
+	private printLog(scopedLogger: ElysianLogger, log: BufferedLog): void {
+		switch (log.level) {
+			case "error":
+				scopedLogger.error(log.message);
+				break;
+			case "warn":
+				scopedLogger.warn(log.message);
+				break;
+			case "debug":
+				scopedLogger.debug(log.message);
+				break;
+			case "info":
+				scopedLogger.info(log.message);
+				break;
+			default:
+				scopedLogger.log(log.message);
+		}
+	}
+
+	/**
+	 * Extract the short display name from a full lambda name
+	 */
+	private getDisplayName(lambdaName: string, appName?: string): string {
+		if (appName && lambdaName.startsWith(`${appName}-`)) {
+			return lambdaName.slice(appName.length + 1);
+		}
+		return lambdaName;
+	}
+
+	/**
+	 * Check if we're in interactive mode
+	 */
+	getIsInteractive(): boolean {
+		return this.isInteractive;
+	}
+
+	/**
+	 * Set interactive mode
+	 */
+	setInteractive(value: boolean): void {
+		this.isInteractive = value;
+	}
+
+	/**
+	 * Get number of active invocations
+	 */
+	getActiveCount(): number {
+		return this.invocations.size;
+	}
+
+	/**
+	 * Flush remaining invocations on exit
+	 */
+	flush(): void {
+		for (const [, inv] of this.invocations) {
+			this.end(inv.ctx.requestId, undefined, "Interrupted");
+		}
+		this.invocations.clear();
+	}
+}
+
+/**
+ * Global concurrent log manager instance
+ */
+export const concurrentLogger = new ConcurrentLogManager();
+
+// ============================================
 // CLI Output Helpers
 // ============================================
 
@@ -612,11 +1025,10 @@ export function printHeader(mode?: string): void {
 
 /**
  * Print a divider line
+ * @deprecated No longer used - kept for backwards compatibility
  */
 export function printDivider(): void {
-	console.log();
-	console.log(`${dimColor}  ${"─".repeat(50)}${resetColor}`);
-	console.log();
+	// No-op: dividers removed for cleaner output
 }
 
 /**
@@ -628,11 +1040,10 @@ export function printBlank(): void {
 
 /**
  * Print a section header
+ * @deprecated No longer used - kept for backwards compatibility
  */
 export function printSection(title: string): void {
-	console.log();
-	console.log(`  ${boldColor}${title}${resetColor}`);
-	console.log();
+	// No-op: section headers removed for cleaner output
 }
 
 /**
@@ -736,16 +1147,17 @@ export function printWatchBox(options: {
 }
 
 /**
- * Print the dev mode status screen
+ * Print the dev mode status screen (simplified)
+ * Route manifest display has been removed for cleaner output.
  */
 export function printDevStatus(options: {
 	duration: number;
-	apiRoutes: Array<{
+	apiRoutes?: Array<{
 		lambda: string;
 		routes: Array<{ method: string; path: string; pathParameters: string[] }>;
 		size?: number;
 	}>;
-	functions: Array<{
+	functions?: Array<{
 		name: string;
 		trigger?: { type: string; config?: Record<string, unknown> };
 		size?: number;
@@ -754,84 +1166,33 @@ export function printDevStatus(options: {
 	openapiEndpoint?: string;
 	localstack?: boolean;
 }): void {
-	// Ready message
-	logger.success(`Ready in ${boldColor}${formatDuration(options.duration)}${resetColor}`);
-
-	// API Routes
-	if (options.apiRoutes.length > 0) {
-		printSection("API Routes");
-
-		const maxPathLen = Math.max(
-			...options.apiRoutes.flatMap((r) => r.routes.map((route) => route.path.length)),
-			10,
-		);
-
-		for (const lambda of options.apiRoutes) {
-			const sizeStr = lambda.size ? formatSize(lambda.size) : undefined;
-			printLambda(lambda.lambda, sizeStr);
-
-			for (const route of lambda.routes) {
-				printRoute(route.method, route.path, route.pathParameters, maxPathLen);
-			}
-			printBlank();
-		}
+	// Ready message with count summary
+	const apiCount = options.apiRoutes?.length ?? 0;
+	const fnCount = options.functions?.length ?? 0;
+	const totalLambdas = apiCount + fnCount;
+	
+	if (totalLambdas > 0) {
+		const parts: string[] = [];
+		if (apiCount > 0) parts.push(`${apiCount} route${apiCount === 1 ? "" : "s"}`);
+		if (fnCount > 0) parts.push(`${fnCount} function${fnCount === 1 ? "" : "s"}`);
+		logger.success(`Ready in ${boldColor}${formatDuration(options.duration)}${resetColor} (${parts.join(", ")})`);
+	} else {
+		logger.success(`Ready in ${boldColor}${formatDuration(options.duration)}${resetColor}`);
 	}
-
-	// Functions
-	if (options.functions.length > 0) {
-		printSection("Functions");
-
-		for (const fn of options.functions) {
-			const sizeStr = fn.size ? formatSize(fn.size) : undefined;
-			let triggerStr: string;
-
-			if (fn.trigger?.type) {
-				const triggerType = fn.trigger.type;
-				if (triggerType === "schedule" && fn.trigger.config && "every" in fn.trigger.config) {
-					triggerStr = `${dimColor}[${triggerType}: ${fn.trigger.config.every}]${resetColor}`;
-				} else {
-					triggerStr = `${dimColor}[${triggerType}]${resetColor}`;
-				}
-			} else {
-				triggerStr = `${dimColor}[manual]${resetColor}`;
-			}
-
-			printLambda(`${fn.name} ${triggerStr}`, sizeStr);
-		}
-		printBlank();
-	}
-
-	// Footer with endpoints
-	printDevFooter({
-		apiEndpoint: options.apiEndpoint,
-		openapiEndpoint: options.openapiEndpoint,
-		localstack: options.localstack,
-	});
 }
 
 /**
  * Print the dev mode footer with endpoints and watching status
+ * @deprecated Use logger.watching() directly instead
  */
 export function printDevFooter(options: {
 	apiEndpoint?: string;
 	openapiEndpoint?: string;
 	localstack?: boolean;
 }): void {
-	printDivider();
-
-	// Endpoints section
-	if (options.apiEndpoint) {
-		console.log(`  ${dimColor}\u279C${resetColor}  ${boldColor}api${resetColor}       ${cyanColor}${options.apiEndpoint}${resetColor}`);
-		if (options.openapiEndpoint) {
-			console.log(`  ${dimColor}\u279C${resetColor}  ${boldColor}openapi${resetColor}   ${cyanColor}${options.openapiEndpoint}${resetColor}`);
-		}
-		printBlank();
-	}
-
-	// Status line
-	const target = options.localstack ? `${greenColor}LocalStack${resetColor}` : `${yellowColor}AWS${resetColor}`;
-	console.log(`  ${dimColor}\u25CF${resetColor} ${dimColor}Watching for changes${resetColor}  ${dimColor}|${resetColor}  ${dimColor}Target:${resetColor} ${target}`);
-	printBlank();
+	// Simplified: just show watching status using Signale
+	const target = options.localstack ? "LocalStack" : "AWS";
+	logger.watching(`for changes (${target})`);
 }
 
 /**
@@ -841,15 +1202,10 @@ export function printDevError(options: {
 	error: string;
 	trigger?: string;
 }): void {
-	logger.error("Build failed");
+	logger.error(`Build failed: ${options.error}`);
 	if (options.trigger) {
-		console.log(`  ${dimColor}Trigger:${resetColor} ${options.trigger}`);
+		logger.note(`Trigger: ${options.trigger}`);
 	}
-	printBlank();
-	console.log(`  ${redColor}${options.error}${resetColor}`);
-	printBlank();
-	console.log(`  ${dimColor}\u25CB Watching for changes...${resetColor}`);
-	printBlank();
 }
 
 /**

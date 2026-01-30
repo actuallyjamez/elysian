@@ -11,6 +11,11 @@ import type { ResolvedConfig } from "./config";
 import type { TriggerType, NormalizedTrigger } from "../runtime/define-lambda";
 
 /**
+ * Callback for logging warnings about skipped files
+ */
+export type DiscoveryWarningCallback = (filename: string, reason: string) => void;
+
+/**
  * Discovered API route file
  */
 export interface DiscoveredApiRoute {
@@ -78,37 +83,84 @@ function getBundleName(appName: string, lambdaName: string): string {
 }
 
 /**
- * Discover all lambda files in both directories
+ * Check if a TypeScript file has a valid default export.
+ * Uses Bun's transpiler to scan exports without full compilation.
+ * 
+ * @param filePath - Path to the TypeScript file
+ * @returns true if the file has a default export, false otherwise
  */
-export function discoverLambdas(
+export async function hasValidDefaultExport(filePath: string): Promise<boolean> {
+	try {
+		const content = await Bun.file(filePath).text();
+		const transpiler = new Bun.Transpiler({ loader: "ts" });
+		const result = transpiler.scan(content);
+		return result.exports.includes("default");
+	} catch {
+		// If we can't parse the file, skip it
+		return false;
+	}
+}
+
+/**
+ * Discover all lambda files in both directories
+ * Validates that files have default exports before including them.
+ * 
+ * @param cwd - Current working directory
+ * @param config - Resolved configuration
+ * @param onWarning - Optional callback for logging warnings about skipped files
+ */
+export async function discoverLambdas(
 	cwd: string,
 	config: ResolvedConfig,
-): DiscoveryResult {
+	onWarning?: DiscoveryWarningCallback,
+): Promise<DiscoveryResult> {
 	const apiDir = join(cwd, config.api.dir);
 	const functionsDir = join(cwd, config.functions.dir);
 
 	// Discover API routes
 	const apiFiles = listTsFiles(apiDir);
-	const apiRoutes: DiscoveredApiRoute[] = apiFiles.map((file) => {
-		const name = basename(file, ".ts");
-		return {
-			name,
-			sourcePath: join(apiDir, file),
-			bundleName: getBundleName(config.name, name),
-		};
-	});
+	const apiRoutes: DiscoveredApiRoute[] = [];
+
+	for (const file of apiFiles) {
+		const sourcePath = join(apiDir, file);
+		const hasExport = await hasValidDefaultExport(sourcePath);
+		
+		if (hasExport) {
+			const name = basename(file, ".ts");
+			apiRoutes.push({
+				name,
+				sourcePath,
+				bundleName: getBundleName(config.name, name),
+			});
+		} else {
+			if (onWarning) {
+				onWarning(file, "no default export");
+			}
+		}
+	}
 
 	// Discover generic functions
 	const functionFiles = listTsFiles(functionsDir);
-	const functions: DiscoveredFunction[] = functionFiles.map((file) => {
-		const name = basename(file, ".ts");
-		return {
-			name,
-			sourcePath: join(functionsDir, file),
-			bundleName: getBundleName(config.name, name),
-			trigger: undefined, // Will be extracted after bundling
-		};
-	});
+	const functions: DiscoveredFunction[] = [];
+
+	for (const file of functionFiles) {
+		const sourcePath = join(functionsDir, file);
+		const hasExport = await hasValidDefaultExport(sourcePath);
+		
+		if (hasExport) {
+			const name = basename(file, ".ts");
+			functions.push({
+				name,
+				sourcePath,
+				bundleName: getBundleName(config.name, name),
+				trigger: undefined, // Will be extracted after bundling
+			});
+		} else {
+			if (onWarning) {
+				onWarning(file, "no default export");
+			}
+		}
+	}
 
 	return {
 		apiRoutes,

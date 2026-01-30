@@ -82,7 +82,9 @@ export const buildCommand = defineCommand({
 		mkdirSync(terraformDir, { recursive: true });
 
 		// Discover lambdas in both directories
-		const discovered = discoverLambdas(cwd, config);
+		const discovered = await discoverLambdas(cwd, config, (filename, reason) => {
+			logger.warn(`Skipping ${filename}: ${reason}`);
+		});
 
 		// Check if we have anything to build
 		if (discovered.apiRoutes.length === 0 && discovered.functions.length === 0) {

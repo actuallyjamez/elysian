@@ -35,7 +35,7 @@ interface WorkerResponse {
 	};
 	// Console log fields
 	level?: "log" | "warn" | "error" | "info" | "debug";
-	args?: unknown[];
+	message?: string;
 }
 
 interface LambdaWorker {
@@ -63,7 +63,7 @@ export interface WorkerRunnerConfig {
 		lambdaName: string,
 		requestId: string,
 		level: "log" | "warn" | "error" | "info" | "debug",
-		args: unknown[],
+		message: string,
 	) => void;
 }
 
@@ -92,42 +92,7 @@ let handlerPath = "";
 let currentRequestId = null;
 let currentLambdaName = "";
 
-// ANSI colors
-const dim = "\\x1b[90m";
-const reset = "\\x1b[0m";
-const yellow = "\\x1b[33m";
-const red = "\\x1b[31m";
-
-// Format timestamp to match Signale's format: [12:17:13 AM]
-function formatTime() {
-	const now = new Date();
-	let h = now.getHours();
-	const m = now.getMinutes().toString().padStart(2, "0");
-	const s = now.getSeconds().toString().padStart(2, "0");
-	const ampm = h >= 12 ? "PM" : "AM";
-	h = h % 12;
-	h = h ? h : 12; // 0 should be 12
-	return "[" + h + ":" + m + ":" + s + " " + ampm + "]";
-}
-
-// Format log output to match Signale's scoped output style
-function formatLog(level, args) {
-	const time = formatTime();
-	const name = currentLambdaName || "worker";
-	const msg = args.map(a => typeof a === "string" ? a : JSON.stringify(a)).join(" ");
-	
-	// Match Signale's format: [HH:MM:SS AM] [scope] › symbol message
-	let symbol = dim + "│" + reset;
-	if (level === "warn") {
-		symbol = yellow + "⚠" + reset;
-	} else if (level === "error") {
-		symbol = red + "✖" + reset;
-	}
-	
-	return dim + time + reset + " [" + name + "] › " + symbol + "  " + msg;
-}
-
-// Override console methods to format output consistently
+// Store original console for non-request logging
 const originalConsole = {
 	log: console.log.bind(console),
 	warn: console.warn.bind(console),
@@ -136,37 +101,75 @@ const originalConsole = {
 	debug: console.debug.bind(console),
 };
 
+// Format args for message passing
+function formatArgs(args) {
+	return args.map(a => {
+		if (typeof a === "string") return a;
+		try {
+			return JSON.stringify(a);
+		} catch {
+			return String(a);
+		}
+	}).join(" ");
+}
+
+// Override console methods to route through main thread for log grouping
 console.log = function(...args) {
 	if (currentRequestId) {
-		originalConsole.log(formatLog("log", args));
+		self.postMessage({
+			type: "console",
+			requestId: currentRequestId,
+			level: "log",
+			message: formatArgs(args),
+		});
 	} else {
 		originalConsole.log(...args);
 	}
 };
 console.warn = function(...args) {
 	if (currentRequestId) {
-		originalConsole.warn(formatLog("warn", args));
+		self.postMessage({
+			type: "console",
+			requestId: currentRequestId,
+			level: "warn",
+			message: formatArgs(args),
+		});
 	} else {
 		originalConsole.warn(...args);
 	}
 };
 console.error = function(...args) {
 	if (currentRequestId) {
-		originalConsole.error(formatLog("error", args));
+		self.postMessage({
+			type: "console",
+			requestId: currentRequestId,
+			level: "error",
+			message: formatArgs(args),
+		});
 	} else {
 		originalConsole.error(...args);
 	}
 };
 console.info = function(...args) {
 	if (currentRequestId) {
-		originalConsole.log(formatLog("info", args));
+		self.postMessage({
+			type: "console",
+			requestId: currentRequestId,
+			level: "info",
+			message: formatArgs(args),
+		});
 	} else {
 		originalConsole.info(...args);
 	}
 };
 console.debug = function(...args) {
 	if (currentRequestId) {
-		originalConsole.log(formatLog("debug", args));
+		self.postMessage({
+			type: "console",
+			requestId: currentRequestId,
+			level: "debug",
+			message: formatArgs(args),
+		});
 	} else {
 		originalConsole.debug(...args);
 	}
@@ -207,7 +210,7 @@ self.onmessage = async (event) => {
 			return;
 		}
 
-		// Set current request context for console formatting
+		// Set current request context for console routing
 		currentRequestId = message.requestId;
 		currentLambdaName = message.displayName || "lambda";
 
@@ -330,9 +333,20 @@ self.onmessage = async (event) => {
 		lambdaWorker: LambdaWorker,
 		message: WorkerResponse,
 	): void {
-		// Note: Console messages are now handled directly by the worker via stdout
-		// We only handle result/error messages here
-		
+		// Handle console messages - route to onConsole callback
+		if (message.type === "console") {
+			if (this.config.onConsole && message.level && message.message !== undefined) {
+				this.config.onConsole(
+					lambdaWorker.lambdaName,
+					message.requestId,
+					message.level,
+					message.message,
+				);
+			}
+			return;
+		}
+
+		// Handle result/error messages
 		if (message.type === "result" || message.type === "error") {
 			const pending = lambdaWorker.pendingRequests.get(message.requestId);
 			if (pending) {

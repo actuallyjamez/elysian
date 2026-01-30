@@ -26,7 +26,7 @@ export async function isLocalStackRunning(
 ): Promise<boolean> {
 	try {
 		const controller = new AbortController();
-		const timeout = setTimeout(() => controller.abort(), 2000);
+		const timeout = setTimeout(() => controller.abort(), 500);
 
 		const response = await fetch(`${endpoint}/_localstack/health`, {
 			signal: controller.signal,
@@ -512,4 +512,260 @@ export async function getLiveModeConfigAws(
 		appSyncApiKey: String(apiKey),
 		apiEndpoint: apiEndpoint ? String(apiEndpoint) : "",
 	};
+}
+
+// ============================================
+// Enhanced Terraform Apply with Retry & Progress
+// ============================================
+
+/**
+ * Terraform progress information parsed from output
+ */
+export interface TerraformProgress {
+	type: "planning" | "creating" | "updating" | "destroying" | "complete" | "error";
+	resource?: string;
+	message?: string;
+}
+
+/**
+ * Options for terraform apply with retry
+ */
+export interface TerraformApplyOptions {
+	/** Maximum number of retry attempts (default: 3) */
+	maxRetries?: number;
+	/** Initial delay between retries in ms (default: 1000, doubles each retry) */
+	retryDelayMs?: number;
+	/** Callback for progress updates */
+	onProgress?: (progress: TerraformProgress) => void;
+	/** Callback when retrying */
+	onRetry?: (attempt: number, maxRetries: number, error: string) => void;
+}
+
+/**
+ * Parse a line of terraform output to extract progress information
+ */
+function parseTerraformLine(line: string): TerraformProgress | null {
+	const trimmed = line.trim();
+	if (!trimmed) return null;
+
+	// Match: "resource_type.name: Creating..."
+	const creatingMatch = trimmed.match(/^([a-z_]+\.[a-z0-9_-]+):\s*Creating\.\.\.$/i);
+	if (creatingMatch) {
+		return { type: "creating", resource: creatingMatch[1] };
+	}
+
+	// Match: "resource_type.name: Modifying..." or "Updating..."
+	const updatingMatch = trimmed.match(/^([a-z_]+\.[a-z0-9_-]+):\s*(?:Modifying|Updating)\.\.\.$/i);
+	if (updatingMatch) {
+		return { type: "updating", resource: updatingMatch[1] };
+	}
+
+	// Match: "resource_type.name: Destroying..."
+	const destroyingMatch = trimmed.match(/^([a-z_]+\.[a-z0-9_-]+):\s*Destroying\.\.\.$/i);
+	if (destroyingMatch) {
+		return { type: "destroying", resource: destroyingMatch[1] };
+	}
+
+	// Match: "resource_type.name: Creation complete"
+	const completeMatch = trimmed.match(/^([a-z_]+\.[a-z0-9_-]+):\s*(?:Creation|Modifications|Destruction)\s+complete/i);
+	if (completeMatch) {
+		return { type: "complete", resource: completeMatch[1] };
+	}
+
+	// Match: "Plan: X to add, Y to change, Z to destroy"
+	const planMatch = trimmed.match(/^Plan:\s*(\d+)\s*to add,\s*(\d+)\s*to change,\s*(\d+)\s*to destroy/i);
+	if (planMatch) {
+		const [, add, change, destroy] = planMatch;
+		return { 
+			type: "planning", 
+			message: `${add} to add, ${change} to change, ${destroy} to destroy` 
+		};
+	}
+
+	// Match: "Apply complete!"
+	if (trimmed.includes("Apply complete!")) {
+		return { type: "complete", message: "Apply complete" };
+	}
+
+	// Match error patterns
+	if (trimmed.startsWith("Error:") || trimmed.startsWith("error:")) {
+		return { type: "error", message: trimmed };
+	}
+
+	return null;
+}
+
+/**
+ * Run terraform apply with streaming output and progress parsing
+ */
+async function runTerraformApplyStreaming(
+	cmd: string[],
+	terraformDir: string,
+	onProgress?: (progress: TerraformProgress) => void,
+): Promise<TfResult> {
+	try {
+		const proc = Bun.spawn(cmd, {
+			cwd: terraformDir,
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+
+		// Read stdout for progress
+		const stdoutReader = proc.stdout.getReader();
+		const decoder = new TextDecoder();
+		let stdoutBuffer = "";
+		let fullStdout = "";
+
+		// Process stdout stream
+		const processStdout = async () => {
+			while (true) {
+				const { done, value } = await stdoutReader.read();
+				if (done) break;
+
+				const chunk = decoder.decode(value, { stream: true });
+				fullStdout += chunk;
+				stdoutBuffer += chunk;
+
+				// Process complete lines
+				const lines = stdoutBuffer.split("\n");
+				stdoutBuffer = lines.pop() || "";
+
+				for (const line of lines) {
+					const progress = parseTerraformLine(line);
+					if (progress && onProgress) {
+						onProgress(progress);
+					}
+				}
+			}
+		};
+
+		// Read stderr
+		const stderrReader = proc.stderr.getReader();
+		let fullStderr = "";
+
+		const processStderr = async () => {
+			while (true) {
+				const { done, value } = await stderrReader.read();
+				if (done) break;
+				fullStderr += decoder.decode(value, { stream: true });
+			}
+		};
+
+		// Process both streams concurrently
+		await Promise.all([processStdout(), processStderr()]);
+
+		const exitCode = await proc.exited;
+
+		if (exitCode !== 0) {
+			return { success: false, error: fullStderr || fullStdout };
+		}
+
+		return { success: true };
+	} catch (error) {
+		return {
+			success: false,
+			error: error instanceof Error ? error.message : String(error),
+		};
+	}
+}
+
+/**
+ * Run tflocal apply with dev_mode=true, retry logic, and progress streaming
+ */
+export async function runTfLocalApplyDevModeWithRetry(
+	terraformDir: string,
+	options: TerraformApplyOptions = {},
+): Promise<TfResult> {
+	const { maxRetries = 3, retryDelayMs = 1000, onProgress, onRetry } = options;
+
+	const cmd = [
+		"tflocal",
+		"apply",
+		"-auto-approve",
+		"-input=false",
+		"-var=dev_mode=true",
+	];
+
+	let lastError: string | undefined;
+
+	for (let attempt = 1; attempt <= maxRetries; attempt++) {
+		const result = await runTerraformApplyStreaming(cmd, terraformDir, onProgress);
+
+		if (result.success) {
+			return result;
+		}
+
+		lastError = result.error;
+
+		if (attempt < maxRetries) {
+			if (onRetry) {
+				onRetry(attempt, maxRetries, lastError || "Unknown error");
+			}
+			const delay = retryDelayMs * Math.pow(2, attempt - 1);
+			await Bun.sleep(delay);
+		}
+	}
+
+	return { success: false, error: lastError };
+}
+
+/**
+ * Run terraform apply with dev_mode=true, retry logic, and progress streaming (for real AWS)
+ */
+export async function runTerraformApplyDevModeWithRetry(
+	terraformDir: string,
+	options: TerraformApplyOptions = {},
+): Promise<TfResult> {
+	const { maxRetries = 3, retryDelayMs = 1000, onProgress, onRetry } = options;
+
+	const cmd = [
+		"terraform",
+		"apply",
+		"-auto-approve",
+		"-input=false",
+		"-var=dev_mode=true",
+	];
+
+	let lastError: string | undefined;
+
+	for (let attempt = 1; attempt <= maxRetries; attempt++) {
+		const result = await runTerraformApplyStreaming(cmd, terraformDir, onProgress);
+
+		if (result.success) {
+			return result;
+		}
+
+		lastError = result.error;
+
+		if (attempt < maxRetries) {
+			if (onRetry) {
+				onRetry(attempt, maxRetries, lastError || "Unknown error");
+			}
+			const delay = retryDelayMs * Math.pow(2, attempt - 1);
+			await Bun.sleep(delay);
+		}
+	}
+
+	return { success: false, error: lastError };
+}
+
+/**
+ * Verify that required terraform outputs exist after apply
+ */
+export async function verifyTerraformOutputs(
+	terraformDir: string,
+	usingLocalStack: boolean,
+): Promise<{ valid: boolean; missing: string[] }> {
+	const outputs = usingLocalStack
+		? await getTerraformOutputs(terraformDir, true)
+		: await getTerraformOutputsAws(terraformDir);
+
+	if (!outputs) {
+		return { valid: false, missing: ["all outputs (failed to read)"] };
+	}
+
+	const required = ["appsync_http_endpoint", "appsync_realtime_endpoint", "appsync_api_key"];
+	const missing = required.filter((key) => !outputs[key]);
+
+	return { valid: missing.length === 0, missing };
 }

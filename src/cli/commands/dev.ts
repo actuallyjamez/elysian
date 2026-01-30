@@ -24,11 +24,13 @@ import {
 	isTerraformInitialized,
 	isTerraformInstalled,
 	runTfLocalInit,
-	runTfLocalApplyDevMode,
 	runTerraformInit,
-	runTerraformApplyDevMode,
 	getLiveModeConfig,
 	getLiveModeConfigAws,
+	runTfLocalApplyDevModeWithRetry,
+	runTerraformApplyDevModeWithRetry,
+	verifyTerraformOutputs,
+	type TerraformProgress,
 } from "../../core/localstack";
 import { createAppSyncClient } from "../../core/appsync-client";
 import {
@@ -44,13 +46,12 @@ import {
 import {
 	logger,
 	printHeader,
-	printBlank,
-	clearScreen,
 	createSpinner as createLoggerSpinner,
-	startInvocation,
-	endInvocation,
-	printDevStatus,
-	printDevError,
+	createStatusLine,
+	concurrentLogger,
+	formatDuration,
+	formatLink,
+	type StatusLine,
 } from "../logger";
 
 export const devCommand = defineCommand({
@@ -82,11 +83,16 @@ export const devCommand = defineCommand({
 			}
 		};
 
+		// Create status line for setup progress (single updating line)
+		const setup = createStatusLine();
+
 		let config: ResolvedConfig;
 		try {
+			setup.update("Loading configuration...");
 			config = await loadConfig();
-			logger.success("Loaded configuration");
+			log("Loaded configuration");
 		} catch (error) {
+			setup.error("Failed to load configuration");
 			logger.error(error instanceof Error ? error.message : String(error));
 			process.exit(1);
 		}
@@ -102,19 +108,19 @@ export const devCommand = defineCommand({
 		mkdirSync(outputDir, { recursive: true });
 		mkdirSync(tempDir, { recursive: true });
 
-		// Detect LocalStack (optional)
+		// Detect LocalStack (optional) - fast check, no status message needed
 		let usingLocalStack = false;
 		if (!args["no-localstack"]) {
 			const detection = await detectLocalStack();
 			if (detection.available) {
 				usingLocalStack = true;
-				logger.success("LocalStack detected");
+				log("LocalStack detected");
 			} else {
 				if (!detection.localstackRunning) {
-					logger.warn("LocalStack not running");
+					log("LocalStack not running");
 				}
 				if (!detection.tfLocalInstalled) {
-					logger.warn("tflocal not installed");
+					log("tflocal not installed");
 				}
 			}
 		}
@@ -123,35 +129,33 @@ export const devCommand = defineCommand({
 		if (!usingLocalStack) {
 			const terraformAvailable = await isTerraformInstalled();
 			if (!terraformAvailable) {
-				logger.error("terraform CLI not found. Install terraform or use LocalStack.");
+				setup.error("terraform CLI not found");
+				logger.error("Install terraform or use LocalStack.");
 				process.exit(1);
 			}
-			logger.info("Using AWS (ensure credentials are configured)");
+			log("Using AWS");
 		}
 
 		// Ensure terraform init
 		if (!isTerraformInitialized(terraformDir)) {
-			const spinner = createLoggerSpinner("Initializing terraform...").start();
+			setup.update("Initializing terraform...");
 			const initResult = usingLocalStack
 				? await runTfLocalInit(terraformDir)
 				: await runTerraformInit(terraformDir);
 			if (!initResult.success) {
-				spinner.fail("Terraform init failed");
+				setup.error("Terraform init failed");
 				logger.error(initResult.error || "Unknown error");
 				process.exit(1);
 			}
-			spinner.succeed("Terraform initialized");
 		}
 
-		// Build state
-		let discovered = discoverLambdas(cwd, config);
+		// Build state - initial discovery without warnings (bundleAll will warn on re-discovery)
+		setup.update("Discovering lambdas...");
+		let discovered = await discoverLambdas(cwd, config);
 		log(`Found ${discovered.apiRoutes.length} API routes, ${discovered.functions.length} generic functions`);
 		
-		// Check if we have anything to build
-		if (discovered.apiRoutes.length === 0 && discovered.functions.length === 0) {
-			logger.warn(`No lambda files found in ${config.api.dir} or ${config.functions.dir}`);
-			process.exit(1);
-		}
+		// Track whether we have any lambdas (allow empty start for watching)
+		const hasLambdas = discovered.apiRoutes.length > 0 || discovered.functions.length > 0;
 
 		let workerRunner: WorkerRunner;
 		let lastError: string | null = null;
@@ -173,23 +177,46 @@ export const devCommand = defineCommand({
 		let queuedBuild: { trigger: string; type: "lambda" | "terraform" } | null = null;
 		const DEBOUNCE_MS = 100;
 
-		// Bundle stub and lambdas BEFORE terraform apply (terraform needs the stub zip)
-		const initialBuildResult = await bundleAll();
-		if (!initialBuildResult.success) {
-			logger.error(`Initial build failed: ${initialBuildResult.error}`);
-			process.exit(1);
-		}
-		log(`Initial build completed: ${initialBuildResult.apiRouteCount} API routes, ${initialBuildResult.genericLambdaCount} functions`);
+		// Track whether we've shown the endpoints (only show once)
+		let hasShownApiEndpoint = false;
+		let hasShownOpenapiEndpoint = false;
 
-		// Generate manifest and terraform vars
-		const manifestResult = await generateManifestFiles();
-		if (!manifestResult.success) {
-			logger.error(`Manifest generation failed: ${manifestResult.error}`);
-			process.exit(1);
+		// Bundle stub and lambdas BEFORE terraform apply (terraform needs the stub zip)
+		// Skip initial bundle if no lambdas (but still apply terraform for user's other infrastructure)
+		let initialBuildResult: { success: boolean; apiRouteCount: number; genericLambdaCount: number; error?: string } = { 
+			success: true, 
+			apiRouteCount: 0, 
+			genericLambdaCount: 0 
+		};
+		if (hasLambdas) {
+			setup.update("Bundling lambdas...");
+			initialBuildResult = await bundleAll();
+			if (!initialBuildResult.success) {
+				setup.error("Build failed");
+				logger.error(initialBuildResult.error || "Unknown error");
+				process.exit(1);
+			}
+			log(`Initial build completed: ${initialBuildResult.apiRouteCount} API routes, ${initialBuildResult.genericLambdaCount} functions`);
+		}
+
+		// Generate manifest and terraform vars (skip if no lambdas)
+		let manifestResult: { success: boolean; routes: number; manifest: ApiManifest | null; error?: string } = {
+			success: true,
+			routes: 0,
+			manifest: null,
+		};
+		if (hasLambdas) {
+			setup.update("Generating manifest...");
+			manifestResult = await generateManifestFiles();
+			if (!manifestResult.success) {
+				setup.error("Manifest generation failed");
+				logger.error(manifestResult.error || "Unknown error");
+				process.exit(1);
+			}
 		}
 
 		// Now we can provision infrastructure (stub zip exists)
-		let liveConfig = await ensureInfrastructure();
+		let liveConfig = await ensureInfrastructure(setup);
 		log(`Live config: API=${liveConfig.apiEndpoint}, AppSync HTTP=${liveConfig.appSyncHttpEndpoint}`);
 
 		workerRunner = createWorkerRunner({
@@ -198,12 +225,16 @@ export const devCommand = defineCommand({
 			onError: (lambdaName, error) => {
 				logger.warn(`${lambdaName}: ${error.message}`);
 			},
-			// Console output from handlers goes directly to stdout via worker
+			onConsole: (lambdaName, requestId, level, message) => {
+				// Route console output through the concurrent logger for grouping
+				concurrentLogger.log(requestId, level, message);
+			},
 		});
 
+		setup.update("Connecting...");
 		const appsyncClient = await startBridge(workerRunner, liveConfig);
 
-		// Load workers for all lambdas
+		// Load workers for all lambdas (fast, no status needed)
 		await workerRunner.reloadAll();
 
 		// Get package sizes for display
@@ -219,11 +250,10 @@ export const devCommand = defineCommand({
 		};
 
 		watchFiles();
-		showReadyScreen();
+		showReadyScreen(setup);
 
 		process.on("SIGINT", async () => {
-			printBlank();
-			logger.info("Stopping...");
+			concurrentLogger.flush(); // Ensure any buffered logs are printed
 			appsyncClient?.disconnect();
 			workerRunner?.terminate();
 			apiWatcher?.close();
@@ -311,45 +341,94 @@ export const devCommand = defineCommand({
 			return names;
 		}
 
-		async function ensureInfrastructure(spinnerLabel: string | null = "Initializing...") {
-			const spinner = spinnerLabel ? createLoggerSpinner(spinnerLabel).start() : null;
+		/**
+		 * Get the schedule interval for a lambda from the manifest
+		 * Returns the 'every' value (e.g., "1m", "1h") if it's a scheduled function
+		 */
+		function getScheduleInterval(lambdaName: string): string | undefined {
+			if (!lastBuildInfo?.manifest) return undefined;
+
+			const genericLambda = lastBuildInfo.manifest.genericLambdas.find(
+				(l) => l.bundleName === lambdaName
+			);
+
+			if (genericLambda?.trigger?.type === "schedule" && genericLambda.trigger.config) {
+				const config = genericLambda.trigger.config as { every?: string };
+				return config.every;
+			}
+
+			return undefined;
+		}
+
+		async function ensureInfrastructure(setupStatus?: StatusLine) {
+			setupStatus?.update("Applying terraform...");
+			
+			const onProgress = (progress: TerraformProgress) => {
+				if (setupStatus) {
+					if (progress.type === "creating" && progress.resource) {
+						setupStatus.update(`Creating ${progress.resource}...`);
+					} else if (progress.type === "updating" && progress.resource) {
+						setupStatus.update(`Updating ${progress.resource}...`);
+					} else if (progress.type === "destroying" && progress.resource) {
+						setupStatus.update(`Destroying ${progress.resource}...`);
+					}
+					// Note: "complete" type is intentionally not handled - the next step will update the status
+				}
+			};
+			
+			const onRetry = (attempt: number, maxRetries: number, error: string) => {
+				logger.warn(`Terraform apply failed, retrying (${attempt}/${maxRetries})...`);
+				log(`Error was: ${error}`);
+			};
+			
 			const applyResult = usingLocalStack
-				? await runTfLocalApplyDevMode(terraformDir)
-				: await runTerraformApplyDevMode(terraformDir);
+				? await runTfLocalApplyDevModeWithRetry(terraformDir, { onProgress, onRetry })
+				: await runTerraformApplyDevModeWithRetry(terraformDir, { onProgress, onRetry });
+			
 			if (!applyResult.success) {
-				spinner?.fail("Terraform apply failed");
+				setupStatus?.error("Terraform apply failed");
 				logger.error(applyResult.error || "Unknown terraform error");
 				process.exit(1);
 			}
-			spinner?.succeed("Initialized");
+			
+			// Verify outputs exist
+			const verification = await verifyTerraformOutputs(terraformDir, usingLocalStack);
+			if (!verification.valid) {
+				setupStatus?.error("Terraform outputs missing");
+				logger.error(`Missing outputs: ${verification.missing.join(", ")}`);
+				logger.note("Run `elysian init` to regenerate terraform files");
+				process.exit(1);
+			}
 
-			const config = usingLocalStack
+			const tfConfig = usingLocalStack
 				? await getLiveModeConfig(terraformDir, true)
 				: await getLiveModeConfigAws(terraformDir);
-			if (!config) {
+			if (!tfConfig) {
 				logger.error("Live mode outputs missing. Run `elysian init` again?");
 				process.exit(1);
 			}
-			return config;
+			return tfConfig;
 		}
 
-		async function startBridge(runner: WorkerRunner, config: Awaited<ReturnType<typeof ensureInfrastructure>>) {
-			const spinner = createLoggerSpinner("Connecting to AppSync...").start();
-			log(`Connecting to AppSync realtime: ${config.appSyncRealtimeEndpoint}`);
+		async function startBridge(runner: WorkerRunner, bridgeConfig: Awaited<ReturnType<typeof ensureInfrastructure>>) {
+			log(`Connecting to AppSync realtime: ${bridgeConfig.appSyncRealtimeEndpoint}`);
 			try {
 				const client = await createAppSyncClient({
-					httpEndpoint: config.appSyncHttpEndpoint,
-					realtimeEndpoint: config.appSyncRealtimeEndpoint,
-					apiKey: config.appSyncApiKey,
+					httpEndpoint: bridgeConfig.appSyncHttpEndpoint,
+					realtimeEndpoint: bridgeConfig.appSyncRealtimeEndpoint,
+					apiKey: bridgeConfig.appSyncApiKey,
 					lambdaNames: getAllLambdaNames(),
 					onInvoke: async (request) => {
+						// Look up schedule interval from manifest if this is a scheduled function
+						const scheduleInterval = getScheduleInterval(request.lambdaName);
+
 						// Start tracking the invocation with full context
-						// Pass app name so we can strip it from display
-						const invocationLogger = startInvocation(
+						concurrentLogger.start(
 							request.lambdaName,
 							request.requestId,
 							request.event,
 							name, // app name for display name extraction
+							scheduleInterval,
 						);
 
 						try {
@@ -357,15 +436,15 @@ export const devCommand = defineCommand({
 
 							// End invocation with appropriate status
 							if (response.error) {
-								endInvocation(request.requestId, undefined, response.error.message);
+								concurrentLogger.end(request.requestId, undefined, response.error.message);
 							} else {
 								const statusCode = (response.response as { statusCode?: number })?.statusCode;
-								endInvocation(request.requestId, statusCode);
+								concurrentLogger.end(request.requestId, statusCode);
 							}
 
 							return response;
 						} catch (error) {
-							endInvocation(
+							concurrentLogger.end(
 								request.requestId,
 								undefined,
 								error instanceof Error ? error : String(error),
@@ -375,13 +454,12 @@ export const devCommand = defineCommand({
 					},
 					onConnect: () => {
 						log("WebSocket connected to AppSync");
-						spinner.succeed("Bridge connected");
 					},
 					onError: (error) => logger.warn(`Bridge error: ${error.message}`),
 				});
 				return client;
 			} catch (error) {
-				spinner.fail("Bridge connection failed");
+				logger.error("Bridge connection failed");
 				logger.error(error instanceof Error ? error.message : String(error));
 				process.exit(1);
 			}
@@ -391,36 +469,26 @@ export const devCommand = defineCommand({
 			const start = Date.now();
 			lastError = null;
 
-			clearScreen();
-			printHeader("\x1b[90mdev\x1b[0m");
-			if (trigger) {
-				logger.info(`Change: ${trigger}`);
-				printBlank();
-			}
+			// Use a single status line for the entire rebuild
+			const status = createStatusLine();
+			status.update(trigger ? `Rebuilding ${trigger}...` : "Rebuilding...");
 
-			const buildSpinner = createLoggerSpinner("Bundling lambdas...").start();
 			const buildResult = await bundleAll();
 			if (!buildResult.success) {
-				buildSpinner.fail("Bundle failed");
+				status.error(`Build failed: ${buildResult.error}`);
 				lastError = buildResult.error ?? "Bundle failed";
-				showReadyScreen(trigger, true);
 				return;
 			}
-			const totalLambdas = buildResult.apiRouteCount + buildResult.genericLambdaCount;
-			buildSpinner.succeed(`Bundled ${totalLambdas} lambda${totalLambdas === 1 ? "" : "s"}`);
 
-			const manifestSpinner = createLoggerSpinner("Updating manifest...").start();
 			const manifestResult = await generateManifestFiles();
 			if (!manifestResult.success) {
-				manifestSpinner.fail("Manifest failed");
+				status.error(`Manifest failed: ${manifestResult.error}`);
 				lastError = manifestResult.error ?? "Manifest failed";
-				showReadyScreen(trigger, true);
 				return;
 			}
-			manifestSpinner.succeed("Manifest updated");
 
-			// Re-apply terraform to ensure new lambdas exist remotely
-			liveConfig = await ensureInfrastructure(null);
+			// Re-apply terraform (this is a full cycle, always apply)
+			liveConfig = await ensureInfrastructure(status);
 
 			const sizes = await getPackageSizes();
 			lastBuildInfo = {
@@ -435,7 +503,10 @@ export const devCommand = defineCommand({
 			await appsyncClient.updateLambdas(getAllLambdaNames());
 			await workerRunner?.reloadAll();
 
-			showReadyScreen(trigger);
+			status.success(`Rebuilt in ${formatDuration(lastBuildInfo.duration)}`);
+
+			// Show API endpoint if this is the first time we have routes
+			maybeShowEndpoints();
 		}
 
 		/**
@@ -449,42 +520,28 @@ export const devCommand = defineCommand({
 			// Store previous manifest for comparison
 			const previousManifest = lastBuildInfo?.manifest ?? null;
 
-			clearScreen();
-			printHeader("\x1b[90mdev\x1b[0m");
-			if (trigger) {
-				logger.info(`Change: ${trigger}`);
-				printBlank();
-			}
+			// Use a single status line for the entire rebuild
+			const status = createStatusLine();
+			status.update(trigger ? `Rebuilding ${trigger}...` : "Rebuilding...");
 
-			const buildSpinner = createLoggerSpinner("Bundling lambdas...").start();
 			const buildResult = await bundleAll();
 			if (!buildResult.success) {
-				buildSpinner.fail("Bundle failed");
+				status.error(`Build failed: ${buildResult.error}`);
 				lastError = buildResult.error ?? "Bundle failed";
-				showReadyScreen(trigger, true);
 				return;
 			}
-			const totalLambdas = buildResult.apiRouteCount + buildResult.genericLambdaCount;
-			buildSpinner.succeed(`Bundled ${totalLambdas} lambda${totalLambdas === 1 ? "" : "s"}`);
 
-			const manifestSpinner = createLoggerSpinner("Updating manifest...").start();
 			const manifestResult = await generateManifestFiles();
 			if (!manifestResult.success) {
-				manifestSpinner.fail("Manifest failed");
+				status.error(`Manifest failed: ${manifestResult.error}`);
 				lastError = manifestResult.error ?? "Manifest failed";
-				showReadyScreen(trigger, true);
 				return;
 			}
-			manifestSpinner.succeed("Manifest updated");
 
 			// Check if terraform is needed by comparing manifests
 			const diff = compareManifests(previousManifest, manifestResult.manifest!);
 			if (diff.requiresTerraform) {
-				logger.info("Infrastructure changes detected:");
-				for (const change of diff.changes) {
-					logger.info(`  \x1b[90m→\x1b[0m ${change}`);
-				}
-				liveConfig = await ensureInfrastructure("Applying infrastructure changes...");
+				liveConfig = await ensureInfrastructure(status);
 			}
 
 			const sizes = await getPackageSizes();
@@ -503,12 +560,17 @@ export const devCommand = defineCommand({
 			// Reload workers to pick up new code
 			await workerRunner?.reloadAll();
 
-			showReadyScreen(trigger);
+			// Show single success line
+			status.success(`Rebuilt in ${formatDuration(lastBuildInfo.duration)}`);
+
+			// Show API endpoint if this is the first time we have routes
+			maybeShowEndpoints();
 		}
 
 		async function bundleAll(): Promise<{ success: boolean; apiRouteCount: number; genericLambdaCount: number; error?: string }> {
-			// Re-discover in case files changed
-			discovered = discoverLambdas(cwd, config);
+			// Re-discover in case files changed (async now with export validation)
+			// Files without default exports are silently skipped
+			discovered = await discoverLambdas(cwd, config);
 			
 			await ensureStubBundled();
 
@@ -707,89 +769,57 @@ export const devCommand = defineCommand({
 			}
 		}
 
-		function showReadyScreen(trigger?: string, failed?: boolean) {
-			clearScreen();
-			printHeader("\x1b[90mdev\x1b[0m");
+		/**
+		 * Show API/OpenAPI endpoints if they exist and haven't been shown yet
+		 */
+		function maybeShowEndpoints() {
+			if (!lastBuildInfo?.manifest) return;
 
-			if (failed) {
-				printDevError({
-					error: lastError || "Unknown error",
-					trigger,
-				});
-				return;
-			}
-
-			if (!lastBuildInfo) {
-				return;
-			}
-
-			// Prepare API routes data grouped by lambda
-			const apiRoutes: Array<{
-				lambda: string;
-				routes: Array<{ method: string; path: string; pathParameters: string[] }>;
-				size?: number;
-			}> = [];
-
-			if (lastBuildInfo.manifest && lastBuildInfo.manifest.routes.length > 0) {
-				// Group routes by lambda
-				const routesByLambda = new Map<string, typeof lastBuildInfo.manifest.routes>();
-				for (const route of lastBuildInfo.manifest.routes) {
-					const displayName = route.lambda.startsWith(`${name}-`)
-						? route.lambda.slice(name.length + 1)
-						: route.lambda;
-					const existing = routesByLambda.get(displayName) || [];
-					existing.push(route);
-					routesByLambda.set(displayName, existing);
-				}
-
-				for (const [displayName, routes] of routesByLambda) {
-					apiRoutes.push({
-						lambda: displayName,
-						routes: routes.map((r) => ({
-							method: r.method,
-							path: r.path,
-							pathParameters: r.pathParameters,
-						})),
-						size: lastBuildInfo.packageSizes.get(displayName),
-					});
-				}
-			}
-
-			// Prepare functions data
-			const functions: Array<{
-				name: string;
-				trigger?: { type: string; config?: Record<string, unknown> };
-				size?: number;
-			}> = [];
-
-			if (lastBuildInfo.manifest && lastBuildInfo.manifest.genericLambdas.length > 0) {
-				for (const lambda of lastBuildInfo.manifest.genericLambdas) {
-					functions.push({
-						name: lambda.name,
-						trigger: lambda.trigger ? {
-							type: lambda.trigger.type,
-							config: lambda.trigger.config,
-						} : undefined,
-						size: lastBuildInfo.packageSizes.get(lambda.name),
-					});
-				}
-			}
-
-			// Compute endpoints
-			const hasApiRoutes = lastBuildInfo.manifest && lastBuildInfo.manifest.routes.length > 0;
+			const hasApiRoutes = lastBuildInfo.manifest.routes.length > 0;
 			const apiEndpoint = hasApiRoutes && liveConfig ? liveConfig.apiEndpoint : undefined;
 			const openapiEndpoint = hasApiRoutes && liveConfig && shouldGenerateOpenApi(config)
 				? liveConfig.apiEndpoint.replace(/\/$/, "") + "/openapi"
 				: undefined;
 
-			printDevStatus({
-				duration: lastBuildInfo.duration,
-				apiRoutes,
-				functions,
-				apiEndpoint,
-				openapiEndpoint,
-				localstack: usingLocalStack,
-			});
+			if (apiEndpoint && !hasShownApiEndpoint) {
+				logger.note(`API: ${formatLink(apiEndpoint)}`);
+				hasShownApiEndpoint = true;
+			}
+			if (openapiEndpoint && !hasShownOpenapiEndpoint) {
+				logger.note(`OpenAPI: ${formatLink(openapiEndpoint)}`);
+				hasShownOpenapiEndpoint = true;
+			}
+		}
+
+		function showReadyScreen(setupStatus: StatusLine) {
+			if (!lastBuildInfo) {
+				return;
+			}
+
+			// Count routes and functions for summary
+			const apiRouteCount = lastBuildInfo.manifest?.routes.length ?? 0;
+			const functionCount = lastBuildInfo.manifest?.genericLambdas.length ?? 0;
+			const lambdaCount = new Set(lastBuildInfo.manifest?.routes.map(r => r.lambda) || []).size;
+
+			// Build summary string
+			const parts: string[] = [];
+			if (lambdaCount > 0) parts.push(`${lambdaCount} route${lambdaCount === 1 ? "" : "s"}`);
+			if (functionCount > 0) parts.push(`${functionCount} function${functionCount === 1 ? "" : "s"}`);
+			const summary = parts.length > 0 ? ` (${parts.join(", ")})` : "";
+
+			// Complete the status line with success
+			const readyMsg = `Ready in ${formatDuration(lastBuildInfo.duration)}${summary}`;
+			setupStatus.success(readyMsg);
+
+			// Show endpoints
+			maybeShowEndpoints();
+
+			// Show watching status
+			const target = usingLocalStack ? "LocalStack" : "AWS";
+			logger.watching(`for changes (${target})`);
+
+			// Blank line to separate from invocation logs
+			console.log();
 		}
 
 		function watchFiles() {
