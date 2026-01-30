@@ -96,6 +96,38 @@ terraform init && terraform apply
 
 ---
 
+## Development Server
+
+The dev server provides instant hot reload via AppSync Events bridge. Changes to your source files rebuild in milliseconds and sync to LocalStack or AWS without redeploys.
+
+```bash
+bun run dev
+bunx @actuallyjamez/elysian dev
+```
+
+### Hot Reload
+
+Every change triggers an instant rebuild. Modified Lambdas sync to the infrastructure within milliseconds, so you can test changes immediately without AWS deployments. The server watches both your source files (`src/api/`, `src/functions/`) and Terraform configuration.
+
+### Comprehensive Logging
+
+All Lambda invocations stream to your terminal with request context. Console output from handlers appears inline with request logs, grouped by request ID for easy tracing.
+
+### Options
+
+```bash
+# Faster rebuilds (no zip packaging)
+bunx @actuallyjamez/elysian dev --no-package
+
+# Skip LocalStack, use AWS directly
+bunx @actuallyjamez/elysian dev --no-localstack
+
+# Verbose debugging output
+bunx @actuallyjamez/elysian dev --verbose
+```
+
+---
+
 ## API Routes
 
 Define HTTP endpoints in `src/api/`. Each file becomes a separate Lambda function with its own API Gateway endpoint. Since `defineRoutes()` returns an Elysia instance, you can use any Elysia plugins, state, decorators, or hooks.
@@ -360,22 +392,6 @@ bunx @actuallyjamez/elysian init
 
 # Skip prompts with options
 bunx @actuallyjamez/elysian init my-api --package-manager bun --install
-```
-
-### Dev
-
-Start the development server with file watching and LocalStack integration. Changes rebuild automatically and sync to LocalStack for testing.
-
-```bash
-# Standard watch mode
-bun run dev
-bunx @actuallyjamez/elysian dev
-
-# Faster (no zip packaging)
-bunx @actuallyjamez/elysian dev --no-package
-
-# Skip LocalStack
-bunx @actuallyjamez/elysian dev --no-localstack
 ```
 
 ### Build
