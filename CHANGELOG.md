@@ -1,5 +1,11 @@
 # @actuallyjamez/elysian
 
+## 0.13.0
+
+### Minor Changes
+
+- [`0a0c82b`](https://github.com/actuallyjamez/elysian/commit/0a0c82b193f08824f4c6e274618e84c1d09b792c) Thanks [@github-actions[bot]](https://github.com/github-actions%5Bbot%5D)! - Documentation overhaul with comprehensive API reference
+
 ## 0.12.1
 
 ### Patch Changes
