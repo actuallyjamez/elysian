@@ -1,5 +1,5 @@
 ---
-"elysian": minor
+"@actuallyjamez/elysian": minor
 ---
 
 Add generic Lambda functions support and improve CLI logging
